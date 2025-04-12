@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .card {
+            margin-bottom: 20px;
+            transition: all 0.2s ease-in-out;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .progress {
+            height: 25px;
+            margin-bottom: 10px;
+        }
+        .node-card {
+            transition: all 0.3s;
+        }
+        .node-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+        }
+        .refresh-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 5px;
+        }
+        .refresh-active {
+            background-color: #28a745;
+        }
+        .refresh-inactive {
+            background-color: #dc3545;
+        }
+        .chart-container {
+            position: relative;
+            height: 250px;
+            width: 100%;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="#">Ray Cluster Dashboard</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav">
+                    <li class="nav-item">
+                        <a class="nav-link active" href="#overview">Overview</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#nodes">Nodes</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#tasks">Tasks</a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container-fluid mt-4">
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <h2>Ray Cluster Dashboard</h2>
+                <p class="text-muted">
+                    <span id="refresh-indicator" class="refresh-indicator refresh-inactive"></span>
+                    Last updated: <span id="last-updated">Never</span>
+                </p>
+            </div>
+            <div class="col-md-6 text-end">
+                <div class="btn-group" role="group">
+                    <button type="button" class="btn btn-primary" id="refresh-button">
+                        <i class="bi bi-arrow-clockwise"></i> Refresh Now
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary" id="auto-refresh-toggle">
+                        Auto Refresh: <span id="auto-refresh-status">On</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+        
+        <div id="overview" class="row mb-4">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <h5 class="mb-0">CPU Usage</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="progress">
+                            <div id="cpu-progress" class="progress-bar" role="progressbar" style="width: 0%"></div>
+                        </div>
+                        <p class="mt-2">Using <span id="used-cpus">0</span> of <span id="total-cpus">0</span> CPUs</p>
+                        <div class="chart-container">
+                            <canvas id="cpu-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header bg-info text-white">
+                        <h5 class="mb-0">Memory Usage</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="progress">
+                            <div id="memory-progress" class="progress-bar bg-info" role="progressbar" style="width: 0%"></div>
+                        </div>
+                        <p class="mt-2">Using <span id="used-memory">0</span> of <span id="total-memory">0</span> GB</p>
+                        <div class="chart-container">
+                            <canvas id="memory-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="row mb-4">
+            <div class="col-md-4">
+                <div class="card text-center">
+                    <div class="card-header bg-success text-white">
+                        <h5 class="mb-0">Worker Nodes</h5>
+                    </div>
+                    <div class="card-body">
+                        <h2 id="worker-count">0</h2>
+                        <p class="text-muted">Active nodes in cluster</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card text-center">
+                    <div class="card-header bg-warning text-dark">
+                        <h5 class="mb-0">Active Tasks</h5>
+                    </div>
+                    <div class="card-body">
+                        <h2 id="task-count">0</h2>
+                        <p class="text-muted">Running in the last minute</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card text-center">
+                    <div class="card-header bg-danger text-white">
+                        <h5 class="mb-0">Current Node</h5>
+                    </div>
+                    <div class="card-body">
+                        <h2 id="local-cpu">0%</h2>
+                        <p class="text-muted">CPU usage on API server</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="nodes" class="row mb-4">
+            <div class="col">
+                <h3>Cluster Nodes</h3>
+                <div id="nodes-container" class="row">
+                    <!-- Node cards will be inserted here -->
+                </div>
+            </div>
+        </div>
+        
+        <div id="tasks" class="row mb-4">
+            <div class="col">
+                <h3>Recent Tasks</h3>
+                <div class="card">
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-striped">
+                                <thead>
+                                    <tr>
+                                        <th>Task ID</th>
+                                        <th>Type</th>
+                                        <th>Status</th>
+                                        <th>Start Time</th>
+                                        <th>Duration</th>
+                                        <th>Node</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="tasks-table-body">
+                                    <tr>
+                                        <td colspan="6" class="text-center">No tasks data available</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Chart data
+        const cpuData = {
+            labels: [],
+            datasets: [{
+                label: 'CPU Usage (%)',
+                data: [],
+                borderColor: 'rgb(75, 192, 192)',
+                tension: 0.1
+            }]
+        };
+        
+        const memoryData = {
+            labels: [],
+            datasets: [{
+                label: 'Memory Usage (GB)',
+                data: [],
+                borderColor: 'rgb(54, 162, 235)',
+                tension: 0.1
+            }]
+        };
+        
+        // Initialize charts
+        const cpuChart = new Chart(
+            document.getElementById('cpu-chart'),
+            {
+                type: 'line',
+                data: cpuData,
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: 100
+                        }
+                    }
+                }
+            }
+        );
+        
+        const memoryChart = new Chart(
+            document.getElementById('memory-chart'),
+            {
+                type: 'line',
+                data: memoryData,
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true
+                        }
+                    }
+                }
+            }
+        );
+        
+        // Add timestamp to charts
+        function addTimePoint(chart, value) {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString();
+            
+            chart.data.labels.push(timeStr);
+            chart.data.datasets[0].data.push(value);
+            
+            // Keep only the last 10 data points
+            if (chart.data.labels.length > 10) {
+                chart.data.labels.shift();
+                chart.data.datasets[0].data.shift();
+            }
+            
+            chart.update();
+        }
+        
+        // Auto-refresh state
+        let autoRefresh = true;
+        let refreshInterval;
+        
+        // Toggle auto-refresh
+        document.getElementById('auto-refresh-toggle').addEventListener('click', function() {
+            autoRefresh = !autoRefresh;
+            document.getElementById('auto-refresh-status').textContent = autoRefresh ? 'On' : 'Off';
+            
+            if (autoRefresh) {
+                refreshInterval = setInterval(updateClusterData, 3000);
+            } else {
+                clearInterval(refreshInterval);
+            }
+        });
+        
+        // Manual refresh
+        document.getElementById('refresh-button').addEventListener('click', updateClusterData);
+        
+        // Update cluster data
+        function updateClusterData() {
+            document.getElementById('refresh-indicator').className = 'refresh-indicator refresh-active';
+            
+            fetch('/api/cluster/status')
+                .then(response => response.json())
+                .then(data => {
+                    // Update timestamps
+                    document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+                    
+                    // Update CPU usage
+                    const cpuPercent = data.total_cpus > 0 ? (data.used_cpus / data.total_cpus) * 100 : 0;
+                    document.getElementById('cpu-progress').style.width = `${cpuPercent}%`;
+                    document.getElementById('cpu-progress').textContent = `${cpuPercent.toFixed(1)}%`;
+                    document.getElementById('used-cpus').textContent = data.used_cpus.toFixed(1);
+                    document.getElementById('total-cpus').textContent = data.total_cpus.toFixed(1);
+                    
+                    // Add to CPU chart
+                    addTimePoint(cpuChart, cpuPercent);
+                    
+                    // Update memory usage
+                    const memoryPercent = data.total_memory_gb > 0 ? (data.used_memory_gb / data.total_memory_gb) * 100 : 0;
+                    document.getElementById('memory-progress').style.width = `${memoryPercent}%`;
+                    document.getElementById('memory-progress').textContent = `${memoryPercent.toFixed(1)}%`;
+                    document.getElementById('used-memory').textContent = data.used_memory_gb.toFixed(1);
+                    document.getElementById('total-memory').textContent = data.total_memory_gb.toFixed(1);
+                    
+                    // Add to memory chart
+                    addTimePoint(memoryChart, data.used_memory_gb);
+                    
+                    // Update worker count and tasks
+                    document.getElementById('worker-count').textContent = data.total_nodes;
+                    document.getElementById('task-count').textContent = data.nodes.reduce((acc, node) => 
+                        acc + (node.tasks_running || 0), 0) || "0";
+                    
+                    // Update node cards
+                    const nodesContainer = document.getElementById('nodes-container');
+                    nodesContainer.innerHTML = '';
+                    
+                    data.nodes.forEach(node => {
+                        const nodeCard = document.createElement('div');
+                        nodeCard.className = 'col-md-4 mb-3';
+                        
+                        const nodeCpuPercent = node.cpus > 0 ? ((node.cpus - node.available_cpus) / node.cpus) * 100 : 0;
+                        const nodeMemoryTotal = node.memory_gb || 0;
+                        const nodeMemoryUsed = nodeMemoryTotal - (node.available_memory_gb || 0);
+                        const nodeMemoryPercent = nodeMemoryTotal > 0 ? (nodeMemoryUsed / nodeMemoryTotal) * 100 : 0;
+                        
+                        nodeCard.innerHTML = `
+                            <div class="card node-card ${node.alive ? '' : 'bg-danger text-white'}">
+                                <div class="card-header">
+                                    ${node.hostname || node.address}
+                                    ${node.alive ? '<span class="badge bg-success float-end">Online</span>' : 
+                                                '<span class="badge bg-danger float-end">Offline</span>'}
+                                </div>
+                                <div class="card-body">
+                                    <p>IP: ${node.address}</p>
+                                    <small>CPU: ${(node.cpus - node.available_cpus).toFixed(1)} / ${node.cpus.toFixed(1)}</small>
+                                    <div class="progress mb-2" style="height: 5px;">
+                                        <div class="progress-bar" role="progressbar" style="width: ${nodeCpuPercent}%"></div>
+                                    </div>
+                                    <small>Memory: ${nodeMemoryUsed.toFixed(1)} / ${nodeMemoryTotal.toFixed(1)} GB</small>
+                                    <div class="progress" style="height: 5px;">
+                                        <div class="progress-bar bg-info" role="progressbar" style="width: ${nodeMemoryPercent}%"></div>
+                                    </div>
+                                    <p class="mt-2 mb-0 text-muted">Node ID: ${node.node_id.substring(0, 8)}...</p>
+                                </div>
+                            </div>
+                        `;
+                        
+                        nodesContainer.appendChild(nodeCard);
+                    });
+                })
+                .catch(error => {
+                    console.error('Error fetching cluster data:', error);
+                    document.getElementById('refresh-indicator').className = 'refresh-indicator refresh-inactive';
+                });
+                
+            // Update local node data
+            fetch('/api/node/resources')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('local-cpu').textContent = `${data.cpu_percent || 0}%`;
+                })
+                .catch(error => {
+                    console.error('Error fetching node resources:', error);
+                });
+                
+            // Simulated tasks data for demonstration (replace with actual endpoint in production)
+            const sampleTasks = [
+                { id: 'task_1234', type: 'file_processing', status: 'completed', start_time: '14:22:33', duration: '2.3s', node: 'nuc-head' },
+                { id: 'task_1235', type: 'claude_api', status: 'running', start_time: '14:23:01', duration: '5.7s', node: 'i5-worker-1' },
+                { id: 'task_1236', type: 'batch_linting', status: 'pending', start_time: '14:23:45', duration: '-', node: 'i5-worker-2' }
+            ];
+            
+            const tasksTable = document.getElementById('tasks-table-body');
+            tasksTable.innerHTML = '';
+            
+            sampleTasks.forEach(task => {
+                const row = document.createElement('tr');
+                
+                let statusBadge;
+                if (task.status === 'completed') {
+                    statusBadge = '<span class="badge bg-success">Completed</span>';
+                } else if (task.status === 'running') {
+                    statusBadge = '<span class="badge bg-primary">Running</span>';
+                } else if (task.status === 'pending') {
+                    statusBadge = '<span class="badge bg-warning text-dark">Pending</span>';
+                } else {
+                    statusBadge = '<span class="badge bg-secondary">Unknown</span>';
+                }
+                
+                row.innerHTML = `
+                    <td>${task.id}</td>
+                    <td>${task.type}</td>
+                    <td>${statusBadge}</td>
+                    <td>${task.start_time}</td>
+                    <td>${task.duration}</td>
+                    <td>${task.node}</td>
+                `;
+                
+                tasksTable.appendChild(row);
+            });
+        }
+        
+        // Initial data load
+        updateClusterData();
+        
+        // Start auto-refresh
+        refreshInterval = setInterval(updateClusterData, 3000);
+    </script>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+# Example /etc/fstab entries for NFS mounts
+# Replace the IP address with your NFS server's IP address
+
+# Basic NFS mount
+192.168.1.100:/mnt/code /mnt/code nfs defaults 0 0
+
+# NFS mount with options for better reliability in cluster environment
+192.168.1.100:/mnt/code /mnt/code nfs rw,soft,intr,timeo=10,retrans=3,_netdev 0 0
+
+# Auto-mounting NFS share (only mounts when accessed)
+192.168.1.100:/mnt/code /mnt/code nfs defaults,nofail,x-systemd.automount 0 0
+
+# NFS mount with specific user mapping
+192.168.1.100:/mnt/code /mnt/code nfs rw,user,exec,noauto,x-systemd.automount,uid=1000,gid=1000 0 0
+
+# Read-only NFS mount (for data that shouldn't be modified by workers)
+192.168.1.100:/mnt/data /mnt/data nfs ro,defaults 0 0
+
+# High-performance NFS mount (adjust based on your network)
+192.168.1.100:/mnt/code /mnt/code nfs rw,vers=4,minorversion=1,hard,timeo=600,retrans=2,noatime,nodiratime 0 0
+
+# NFS mount for unstable networks (more tolerant of network issues)
+192.168.1.100:/mnt/code /mnt/code nfs rw,soft,intr,noac,retrans=10,timeo=20 0 0

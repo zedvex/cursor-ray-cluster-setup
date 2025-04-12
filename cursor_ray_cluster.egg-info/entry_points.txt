@@ -1,0 +1,9 @@
+[console_scripts]
+ray-formatter = scripts.run_formatter:main
+ray-indexer = scripts.run_indexer:main
+ray-linter = scripts.run_linter:main
+ray-monitor = cluster.monitor:main
+ray-proxy = scripts.start_ray_proxy:main
+ray-start = cluster.ray_start:main
+ray-stop = cluster.ray_stop:main
+ray-tests = scripts.run_tests:main
