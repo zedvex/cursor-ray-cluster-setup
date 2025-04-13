@@ -1,726 +1,446 @@
 #!/usr/bin/env python3
 """
-Benchmarking script for Ray cluster - measures performance for different task types,
-batch sizes, and workloads to help optimize cluster configuration.
+Benchmarking script for measuring performance of various operations on the Ray cluster.
+
+This script provides benchmarks for:
+1. Task execution latency
+2. Throughput testing
+3. Memory/CPU utilization 
+4. Data transfer overhead
 """
 
+import argparse
+import json
+import logging
 import os
+import random
 import sys
 import time
-import argparse
-import logging
-import random
-import json
-import math
-import statistics
-from typing import List, Dict, Any, Optional, Callable, Tuple
+from typing import Dict, List, Optional, Tuple, Union, Any
+
+import numpy as np
+import psutil
 import ray
-
-# Add the project root to the Python path
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, project_root)
-
-from ray_tasks.task_manager import distribute_tasks, execute_in_parallel
-from ray_tasks.resource_utils import get_cluster_resources, get_node_resources
-from ray_tasks.error_handling import retry
 
 # Configure logging
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("ray-benchmarks")
 
-# ---------- CPU Benchmarks ----------
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the benchmarking script."""
+    parser = argparse.ArgumentParser(
+        description="Run benchmarks on the Ray cluster"
+    )
+    parser.add_argument(
+        "--address", 
+        type=str,
+        default=None,
+        help="The address of the Ray cluster to connect to"
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Output file for benchmark results (JSON)"
+    )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=5,
+        help="Number of iterations for each benchmark"
+    )
+    parser.add_argument(
+        "--task-count",
+        type=int,
+        default=1000,
+        help="Number of tasks to spawn for throughput testing"
+    )
+    parser.add_argument(
+        "--data-size-mb",
+        type=int,
+        default=10,
+        help="Data size in MB for data transfer benchmark"
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        default="INFO",
+        help="Set the logging level"
+    )
+    parser.add_argument(
+        "--benchmarks",
+        type=str,
+        default="latency,throughput,resource,data_transfer",
+        help="Comma-separated list of benchmarks to run"
+    )
+    parser.add_argument(
+        "--ray-address",
+        type=str,
+        default="auto",
+        help="Ray cluster address (default: auto)",
+    )
+    parser.add_argument(
+        "--payload-size",
+        type=int,
+        default=1024,
+        help="Size of payload in bytes for data transfer benchmarks (default: 1KB)",
+    )
+    parser.add_argument(
+        "--include",
+        type=str,
+        default="all",
+        help="Comma-separated list of benchmarks to run (default: all)",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging",
+    )
+    return parser.parse_args()
+
 
 @ray.remote
-def cpu_intensive_task(n: int = 10000000) -> Dict[str, Any]:
+def empty_task() -> float:
     """
-    CPU-intensive benchmark that computes prime numbers
+    Simple empty task for latency benchmarking.
+    
+    Returns:
+        Current timestamp
+    """
+    return time.time()
+
+
+@ray.remote
+def compute_task(complexity: int = 1000000) -> Tuple[float, float]:
+    """
+    CPU-intensive task for computation benchmarking.
     
     Args:
-        n: Upper limit for finding prime numbers
+        complexity: Computational complexity factor
         
     Returns:
-        Dictionary with benchmark results
+        Tuple of (result, execution_time)
     """
     start_time = time.time()
     
-    # Get node info
-    import socket
-    node_name = socket.gethostname()
-    
-    # Simple prime number computation (intentionally inefficient)
-    primes = []
-    for i in range(2, n):
-        is_prime = True
-        for j in range(2, int(math.sqrt(i)) + 1):
-            if i % j == 0:
-                is_prime = False
-                break
-        if is_prime:
-            primes.append(i)
-    
-    # Take only the last 10 primes to keep result size small
-    result_primes = primes[-10:] if primes else []
-    elapsed_time = time.time() - start_time
-    
-    return {
-        "task_type": "cpu_intensive",
-        "node": node_name,
-        "input_size": n,
-        "elapsed_time": elapsed_time,
-        "result_sample": result_primes
-    }
+    # Perform some CPU-intensive calculation
+    result = 0
+    for i in range(complexity):
+        result += i
+        
+    end_time = time.time()
+    return result, end_time - start_time
 
-# ---------- Memory Benchmarks ----------
 
 @ray.remote
-def memory_intensive_task(size_mb: int = 100) -> Dict[str, Any]:
+def memory_task(size_mb: int = 10) -> Tuple[int, float]:
     """
-    Memory-intensive benchmark that allocates and processes large arrays
+    Memory-intensive task for memory benchmarking.
     
     Args:
-        size_mb: Size of memory to allocate in MB
+        size_mb: Size of the array to allocate in MB
         
     Returns:
-        Dictionary with benchmark results
+        Tuple of (array_size, execution_time)
     """
     start_time = time.time()
     
-    # Get node info
-    import socket
-    node_name = socket.gethostname()
+    # Allocate memory
+    size_bytes = size_mb * 1024 * 1024
+    data = bytearray(size_bytes)
     
-    # Allocate a large array
-    try:
-        import numpy as np
-        # Create a large array (size_mb megabytes)
-        array_size = size_mb * 1024 * 1024 // 8  # Convert MB to number of float64 elements
-        data = np.random.random(array_size)
-        
-        # Do some computation on the array
-        result = np.mean(data), np.std(data), np.min(data), np.max(data)
-        success = True
-    except Exception as e:
-        result = str(e)
-        success = False
+    # Simple operations on the allocated memory
+    for i in range(0, size_bytes, 1024 * 1024):
+        data[i] = 1
     
-    elapsed_time = time.time() - start_time
-    
-    return {
-        "task_type": "memory_intensive",
-        "node": node_name,
-        "memory_mb": size_mb,
-        "elapsed_time": elapsed_time,
-        "success": success,
-        "result_sample": result
-    }
+    end_time = time.time()
+    return len(data), end_time - start_time
 
-# ---------- I/O Benchmarks ----------
 
 @ray.remote
-def io_intensive_task(file_size_mb: int = 10, read_only: bool = False) -> Dict[str, Any]:
+def data_transfer_task(data: bytes) -> int:
     """
-    I/O-intensive benchmark that writes and reads temporary files
+    Task that accepts and returns data for data transfer benchmarking.
     
     Args:
-        file_size_mb: Size of the temporary file to create in MB
-        read_only: If True, only read an existing file, don't write
+        data: Data to transfer
         
     Returns:
-        Dictionary with benchmark results
+        Size of the data received
     """
-    import os
-    import tempfile
-    import hashlib
-    
-    start_time = time.time()
-    
-    # Get node info
-    import socket
-    node_name = socket.gethostname()
-    
-    # Create a temporary file
-    temp_file = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False) as temp:
-            temp_file = temp.name
-            
-            # Write phase
-            write_time = 0
-            if not read_only:
-                write_start = time.time()
-                # Write random data to the file
-                chunk_size = 1024 * 1024  # 1MB
-                for _ in range(file_size_mb):
-                    temp.write(os.urandom(chunk_size))
-                temp.flush()
-                os.fsync(temp.fileno())  # Make sure it's written to disk
-                write_time = time.time() - write_start
-            
-            # Read phase
-            read_start = time.time()
-            # Read the file and compute hash
-            md5 = hashlib.md5()
-            with open(temp_file, 'rb') as f:
-                while True:
-                    data = f.read(1024 * 1024)
-                    if not data:
-                        break
-                    md5.update(data)
-            read_time = time.time() - read_start
-            
-            success = True
-            result = {
-                "file_size_mb": file_size_mb,
-                "md5": md5.hexdigest(),
-                "write_time": write_time,
-                "read_time": read_time
-            }
-    except Exception as e:
-        success = False
-        result = str(e)
-    finally:
-        # Clean up
-        if temp_file and os.path.exists(temp_file):
-            os.unlink(temp_file)
-    
-    elapsed_time = time.time() - start_time
-    
-    return {
-        "task_type": "io_intensive",
-        "node": node_name,
-        "elapsed_time": elapsed_time,
-        "success": success,
-        "result": result
-    }
+    # Perform a small computation on the data
+    result = sum(data[::1024 * 1024])
+    return len(data)
 
-# ---------- Network Benchmarks ----------
 
-@ray.remote
-def ping_task(target_node: str, data_size_kb: int = 10) -> Dict[str, Any]:
+def benchmark_latency(iterations: int = 5) -> Dict[str, Union[float, List[float]]]:
     """
-    Network benchmark that measures inter-node communication
+    Benchmark task execution latency.
     
     Args:
-        target_node: Node to ping
-        data_size_kb: Size of data to send in KB
+        iterations: Number of iterations to run
         
     Returns:
-        Dictionary with benchmark results
+        Dictionary with latency statistics
     """
-    start_time = time.time()
+    logger.info("Running latency benchmark...")
     
-    # Get node info
-    import socket
-    source_node = socket.gethostname()
+    latencies = []
     
-    # Create random data to send
-    data = os.urandom(data_size_kb * 1024)
-    
-    try:
-        # We'll ping by submitting a task to the target node
-        # and waiting for the response
-        @ray.remote
-        def echo_task(data, source):
-            import socket
-            return {
-                "data_size": len(data),
-                "source": source,
-                "target": socket.gethostname(),
-                "received_at": time.time()
-            }
+    for i in range(iterations):
+        start_time = time.time()
+        ray.get(empty_task.remote())
+        end_time = time.time()
         
-        # Get available nodes
-        nodes = ray.nodes()
-        target_found = False
+        latency = (end_time - start_time) * 1000  # Convert to ms
+        latencies.append(latency)
         
-        for node in nodes:
-            if target_node in node.get("NodeManagerAddress", "") or target_node == node.get("NodeName"):
-                target_found = True
-                # Place the echo task on the target node
-                node_ip = node["NodeManagerAddress"]
-                remote_task = echo_task.options(resources={f"node:{node_ip}": 0.01}).remote(data, source_node)
-                # Wait for the result
-                response = ray.get(remote_task)
-                success = True
-                break
-        
-        if not target_found:
-            response = f"Target node {target_node} not found"
-            success = False
-            
-    except Exception as e:
-        response = str(e)
-        success = False
+        logger.debug(f"Iteration {i+1}/{iterations}: Latency = {latency:.2f} ms")
     
-    elapsed_time = time.time() - start_time
+    # Calculate statistics
+    avg_latency = sum(latencies) / len(latencies)
+    min_latency = min(latencies)
+    max_latency = max(latencies)
+    
+    logger.info(f"Latency benchmark results: avg={avg_latency:.2f} ms, min={min_latency:.2f} ms, max={max_latency:.2f} ms")
     
     return {
-        "task_type": "network",
-        "source_node": source_node,
-        "target_node": target_node,
-        "data_size_kb": data_size_kb,
-        "elapsed_time": elapsed_time,
-        "success": success,
-        "result": response
+        "avg_latency_ms": avg_latency,
+        "min_latency_ms": min_latency,
+        "max_latency_ms": max_latency,
+        "latencies_ms": latencies,
     }
 
-# ---------- Batch Processing Benchmarks ----------
 
-@ray.remote
-def process_batch(batch: List[int], work_factor: int = 1000000) -> Dict[str, Any]:
+def benchmark_throughput(task_count: int = 1000, iterations: int = 5) -> Dict[str, Union[float, List[float]]]:
     """
-    Process a batch of items with configurable workload
+    Benchmark task throughput.
     
     Args:
-        batch: List of items to process
-        work_factor: Factor controlling the amount of work per item
+        task_count: Number of tasks to spawn
+        iterations: Number of iterations to run
         
     Returns:
-        Dictionary with benchmark results
+        Dictionary with throughput statistics
     """
-    start_time = time.time()
+    logger.info(f"Running throughput benchmark with {task_count} tasks...")
     
-    # Get node info
-    import socket
-    node_name = socket.gethostname()
+    throughputs = []
     
-    results = []
-    for item in batch:
-        # Simulate some CPU-intensive work
-        result = 0
-        for i in range(work_factor):
-            result += math.sin(item + i)
-        results.append(result)
+    for i in range(iterations):
+        # Submit tasks
+        start_time = time.time()
+        tasks = [empty_task.remote() for _ in range(task_count)]
+        ray.get(tasks)
+        end_time = time.time()
+        
+        duration = end_time - start_time
+        throughput = task_count / duration
+        throughputs.append(throughput)
+        
+        logger.debug(f"Iteration {i+1}/{iterations}: Throughput = {throughput:.2f} tasks/sec, Duration = {duration:.2f} sec")
     
-    elapsed_time = time.time() - start_time
+    # Calculate statistics
+    avg_throughput = sum(throughputs) / len(throughputs)
+    min_throughput = min(throughputs)
+    max_throughput = max(throughputs)
+    
+    logger.info(f"Throughput benchmark results: avg={avg_throughput:.2f} tasks/sec, min={min_throughput:.2f} tasks/sec, max={max_throughput:.2f} tasks/sec")
     
     return {
-        "task_type": "batch",
-        "node": node_name,
-        "batch_size": len(batch),
-        "work_factor": work_factor,
-        "elapsed_time": elapsed_time,
-        "results_sample": results[:3] if results else []
+        "avg_throughput": avg_throughput,
+        "min_throughput": min_throughput,
+        "max_throughput": max_throughput,
+        "throughputs": throughputs,
     }
 
-# ---------- Benchmark Runners ----------
 
-def run_cpu_benchmark(
-    repetitions: int = 5,
-    workload_sizes: Optional[List[int]] = None,
-    num_tasks: int = 10
-) -> Dict[str, Any]:
+def benchmark_resource_utilization(complexity: int = 1000000, iterations: int = 5) -> Dict[str, Union[float, List[float]]]:
     """
-    Run CPU-intensive benchmark
+    Benchmark CPU and memory utilization.
     
     Args:
-        repetitions: Number of times to repeat each workload
-        workload_sizes: List of workload sizes to test
-        num_tasks: Number of tasks to run for each workload size
+        complexity: Computational complexity factor
+        iterations: Number of iterations to run
         
     Returns:
-        Dictionary with benchmark results
+        Dictionary with resource utilization statistics
     """
-    if workload_sizes is None:
-        workload_sizes = [1000000, 5000000, 10000000]
+    logger.info("Running resource utilization benchmark...")
     
-    logger.info("Running CPU benchmark")
+    cpu_times = []
+    memory_usages = []
     
-    results = {}
+    # Get initial process stats
+    process = psutil.Process()
+    initial_memory = process.memory_info().rss / (1024 * 1024)  # MB
     
-    for size in workload_sizes:
-        logger.info(f"Testing workload size: {size}")
+    for i in range(iterations):
+        # Run CPU-intensive task
+        result, exec_time = ray.get(compute_task.remote(complexity))
+        cpu_times.append(exec_time)
         
-        size_results = []
-        for rep in range(repetitions):
-            logger.info(f"Repetition {rep+1}/{repetitions}")
-            
-            # Create tasks
-            tasks = [cpu_intensive_task.remote(size) for _ in range(num_tasks)]
-            
-            # Measure total time
-            start_time = time.time()
-            task_results = ray.get(tasks)
-            total_time = time.time() - start_time
-            
-            # Calculate task times
-            task_times = [result["elapsed_time"] for result in task_results]
-            
-            # Record results
-            rep_result = {
-                "total_time": total_time,
-                "task_times": task_times,
-                "avg_task_time": statistics.mean(task_times),
-                "min_task_time": min(task_times),
-                "max_task_time": max(task_times),
-                "std_dev": statistics.stdev(task_times) if len(task_times) > 1 else 0,
-                "tasks_per_second": num_tasks / total_time
-            }
-            size_results.append(rep_result)
+        # Check memory usage
+        current_memory = process.memory_info().rss / (1024 * 1024)  # MB
+        memory_usage = current_memory - initial_memory
+        memory_usages.append(memory_usage)
         
-        # Aggregate results across repetitions
-        avg_total_time = statistics.mean([r["total_time"] for r in size_results])
-        avg_task_time = statistics.mean([r["avg_task_time"] for r in size_results])
-        avg_tasks_per_second = statistics.mean([r["tasks_per_second"] for r in size_results])
-        
-        results[str(size)] = {
-            "workload_size": size,
-            "repetitions": repetitions,
-            "num_tasks": num_tasks,
-            "avg_total_time": avg_total_time,
-            "avg_task_time": avg_task_time,
-            "avg_tasks_per_second": avg_tasks_per_second,
-            "detailed_results": size_results
-        }
+        logger.debug(f"Iteration {i+1}/{iterations}: CPU time = {exec_time:.2f} sec, Memory usage = {memory_usage:.2f} MB")
+    
+    # Calculate statistics
+    avg_cpu_time = sum(cpu_times) / len(cpu_times)
+    avg_memory_usage = sum(memory_usages) / len(memory_usages)
+    
+    logger.info(f"Resource utilization benchmark results: avg_cpu_time={avg_cpu_time:.2f} sec, avg_memory_usage={avg_memory_usage:.2f} MB")
     
     return {
-        "benchmark_type": "cpu",
-        "results": results
+        "avg_cpu_time": avg_cpu_time,
+        "cpu_times": cpu_times,
+        "avg_memory_usage_mb": avg_memory_usage,
+        "memory_usages_mb": memory_usages,
     }
 
-def run_memory_benchmark(
-    repetitions: int = 3,
-    memory_sizes_mb: Optional[List[int]] = None,
-    num_tasks: int = 5
-) -> Dict[str, Any]:
+
+def benchmark_data_transfer(data_size_mb: int = 10, iterations: int = 5) -> Dict[str, Union[float, List[float]]]:
     """
-    Run memory-intensive benchmark
+    Benchmark data transfer overhead.
     
     Args:
-        repetitions: Number of times to repeat each workload
-        memory_sizes_mb: List of memory sizes to test in MB
-        num_tasks: Number of tasks to run for each memory size
+        data_size_mb: Size of the data to transfer in MB
+        iterations: Number of iterations to run
         
     Returns:
-        Dictionary with benchmark results
+        Dictionary with data transfer statistics
     """
-    if memory_sizes_mb is None:
-        memory_sizes_mb = [100, 500, 1000]
+    logger.info(f"Running data transfer benchmark with {data_size_mb} MB data...")
     
-    logger.info("Running memory benchmark")
+    transfer_times = []
     
-    results = {}
+    # Create test data
+    data_size = data_size_mb * 1024 * 1024
+    data = bytearray(random.getrandbits(8) for _ in range(data_size))
     
-    for size_mb in memory_sizes_mb:
-        logger.info(f"Testing memory size: {size_mb} MB")
+    for i in range(iterations):
+        # Transfer data to and from a Ray task
+        start_time = time.time()
+        size = ray.get(data_transfer_task.remote(data))
+        end_time = time.time()
         
-        size_results = []
-        for rep in range(repetitions):
-            logger.info(f"Repetition {rep+1}/{repetitions}")
-            
-            # Create tasks
-            tasks = [memory_intensive_task.remote(size_mb) for _ in range(num_tasks)]
-            
-            # Measure total time
-            start_time = time.time()
-            task_results = ray.get(tasks)
-            total_time = time.time() - start_time
-            
-            # Calculate task times
-            successful_tasks = [r for r in task_results if r.get("success", False)]
-            failed_tasks = [r for r in task_results if not r.get("success", False)]
-            
-            if successful_tasks:
-                task_times = [result["elapsed_time"] for result in successful_tasks]
-                
-                # Record results
-                rep_result = {
-                    "total_time": total_time,
-                    "successful_tasks": len(successful_tasks),
-                    "failed_tasks": len(failed_tasks),
-                    "task_times": task_times,
-                    "avg_task_time": statistics.mean(task_times) if task_times else 0,
-                    "min_task_time": min(task_times) if task_times else 0,
-                    "max_task_time": max(task_times) if task_times else 0,
-                    "std_dev": statistics.stdev(task_times) if len(task_times) > 1 else 0,
-                    "mb_per_second": (size_mb * len(successful_tasks)) / total_time if total_time > 0 else 0
-                }
-            else:
-                rep_result = {
-                    "total_time": total_time,
-                    "successful_tasks": 0,
-                    "failed_tasks": len(failed_tasks),
-                    "error": "All tasks failed"
-                }
-            
-            size_results.append(rep_result)
+        transfer_time = end_time - start_time
+        transfer_times.append(transfer_time)
         
-        # Aggregate results across repetitions
-        successful_reps = [r for r in size_results if r.get("successful_tasks", 0) > 0]
-        
-        if successful_reps:
-            avg_total_time = statistics.mean([r["total_time"] for r in successful_reps])
-            avg_task_time = statistics.mean([r["avg_task_time"] for r in successful_reps])
-            avg_mb_per_second = statistics.mean([r["mb_per_second"] for r in successful_reps])
-            
-            results[str(size_mb)] = {
-                "memory_size_mb": size_mb,
-                "repetitions": repetitions,
-                "num_tasks": num_tasks,
-                "avg_total_time": avg_total_time,
-                "avg_task_time": avg_task_time,
-                "avg_mb_per_second": avg_mb_per_second,
-                "detailed_results": size_results
-            }
-        else:
-            results[str(size_mb)] = {
-                "memory_size_mb": size_mb,
-                "repetitions": repetitions,
-                "num_tasks": num_tasks,
-                "error": "All repetitions failed",
-                "detailed_results": size_results
-            }
+        logger.debug(f"Iteration {i+1}/{iterations}: Transfer time = {transfer_time:.2f} sec ({data_size_mb} MB)")
+    
+    # Calculate statistics
+    avg_transfer_time = sum(transfer_times) / len(transfer_times)
+    min_transfer_time = min(transfer_times)
+    max_transfer_time = max(transfer_times)
+    
+    # Calculate throughput in MB/s
+    avg_throughput = data_size_mb / avg_transfer_time
+    
+    logger.info(f"Data transfer benchmark results: avg_time={avg_transfer_time:.2f} sec, throughput={avg_throughput:.2f} MB/s")
     
     return {
-        "benchmark_type": "memory",
-        "results": results
+        "data_size_mb": data_size_mb,
+        "avg_transfer_time": avg_transfer_time,
+        "min_transfer_time": min_transfer_time,
+        "max_transfer_time": max_transfer_time,
+        "transfer_throughput_mbps": avg_throughput,
+        "transfer_times": transfer_times,
     }
 
-def run_batch_benchmark(
-    repetitions: int = 3,
-    batch_sizes: Optional[List[int]] = None,
-    num_batches: int = 10,
-    work_factor: int = 100000
-) -> Dict[str, Any]:
-    """
-    Run batch processing benchmark
-    
-    Args:
-        repetitions: Number of times to repeat each workload
-        batch_sizes: List of batch sizes to test
-        num_batches: Number of batches to process for each size
-        work_factor: Factor controlling work per item
-        
-    Returns:
-        Dictionary with benchmark results
-    """
-    if batch_sizes is None:
-        batch_sizes = [10, 50, 100, 500]
-    
-    logger.info("Running batch processing benchmark")
-    
-    results = {}
-    
-    for batch_size in batch_sizes:
-        logger.info(f"Testing batch size: {batch_size}")
-        
-        size_results = []
-        for rep in range(repetitions):
-            logger.info(f"Repetition {rep+1}/{repetitions}")
-            
-            # Create batches
-            batches = []
-            for _ in range(num_batches):
-                batch = [random.randint(1, 1000) for _ in range(batch_size)]
-                batches.append(batch)
-            
-            # Create tasks
-            tasks = [process_batch.remote(batch, work_factor) for batch in batches]
-            
-            # Measure total time
-            start_time = time.time()
-            task_results = ray.get(tasks)
-            total_time = time.time() - start_time
-            
-            # Calculate task times
-            task_times = [result["elapsed_time"] for result in task_results]
-            
-            # Record results
-            rep_result = {
-                "total_time": total_time,
-                "task_times": task_times,
-                "avg_task_time": statistics.mean(task_times),
-                "min_task_time": min(task_times),
-                "max_task_time": max(task_times),
-                "std_dev": statistics.stdev(task_times) if len(task_times) > 1 else 0,
-                "items_per_second": (batch_size * num_batches) / total_time,
-                "batches_per_second": num_batches / total_time
-            }
-            size_results.append(rep_result)
-        
-        # Aggregate results across repetitions
-        avg_total_time = statistics.mean([r["total_time"] for r in size_results])
-        avg_task_time = statistics.mean([r["avg_task_time"] for r in size_results])
-        avg_items_per_second = statistics.mean([r["items_per_second"] for r in size_results])
-        
-        results[str(batch_size)] = {
-            "batch_size": batch_size,
-            "num_batches": num_batches,
-            "work_factor": work_factor,
-            "repetitions": repetitions,
-            "avg_total_time": avg_total_time,
-            "avg_task_time": avg_task_time,
-            "avg_items_per_second": avg_items_per_second,
-            "detailed_results": size_results
-        }
-    
-    return {
-        "benchmark_type": "batch",
-        "results": results
-    }
 
-def run_all_benchmarks(
-    output_file: Optional[str] = None,
-    cpu_benchmark: bool = True,
-    memory_benchmark: bool = True,
-    batch_benchmark: bool = True,
-    repetitions: int = 3
-) -> Dict[str, Any]:
+def run_benchmarks(args: argparse.Namespace) -> Dict[str, Dict]:
     """
-    Run all benchmarks
+    Run all requested benchmarks.
     
     Args:
-        output_file: File to write benchmark results to
-        cpu_benchmark: Whether to run CPU benchmark
-        memory_benchmark: Whether to run memory benchmark
-        batch_benchmark: Whether to run batch benchmark
-        repetitions: Number of repetitions for each benchmark
+        args: Command-line arguments
         
     Returns:
         Dictionary with all benchmark results
     """
-    start_time = time.time()
+    benchmarks_to_run = [b.strip().lower() for b in args.benchmarks.split(",")]
+    results = {}
     
-    # Initialize Ray if not already
-    if not ray.is_initialized():
-        try:
-            ray.init(address="auto", ignore_reinit_error=True)
-            logger.info("Connected to existing Ray cluster")
-        except ConnectionError:
-            ray.init(ignore_reinit_error=True)
-            logger.info("Started new local Ray instance")
+    # Run requested benchmarks
+    if "latency" in benchmarks_to_run:
+        results["latency"] = benchmark_latency(args.iterations)
     
-    # Get cluster resources
-    resources = get_cluster_resources()
-    logger.info(f"Running benchmarks on cluster with {resources['total_nodes']} nodes, "
-                f"{resources['total_cpus']} CPUs, {resources['total_memory_gb']:.1f} GB memory")
+    if "throughput" in benchmarks_to_run:
+        results["throughput"] = benchmark_throughput(args.task_count, args.iterations)
     
-    # Run benchmarks
-    all_results = {
-        "timestamp": time.time(),
-        "cluster_resources": resources,
-        "benchmarks": {}
+    if "resource" in benchmarks_to_run:
+        results["resource_utilization"] = benchmark_resource_utilization(iterations=args.iterations)
+    
+    if "data_transfer" in benchmarks_to_run:
+        results["data_transfer"] = benchmark_data_transfer(args.data_size_mb, args.iterations)
+    
+    # Add system info
+    results["system_info"] = {
+        "cluster_resources": ray.cluster_resources(),
+        "available_resources": ray.available_resources(),
+        "cpu_count": psutil.cpu_count(),
+        "system_memory_gb": psutil.virtual_memory().total / (1024**3),
+        "python_version": sys.version,
     }
     
-    if cpu_benchmark:
-        logger.info("Starting CPU benchmark")
-        cpu_results = run_cpu_benchmark(repetitions=repetitions)
-        all_results["benchmarks"]["cpu"] = cpu_results
-        logger.info("CPU benchmark completed")
-    
-    if memory_benchmark:
-        logger.info("Starting memory benchmark")
-        memory_results = run_memory_benchmark(repetitions=repetitions)
-        all_results["benchmarks"]["memory"] = memory_results
-        logger.info("Memory benchmark completed")
-    
-    if batch_benchmark:
-        logger.info("Starting batch processing benchmark")
-        batch_results = run_batch_benchmark(repetitions=repetitions)
-        all_results["benchmarks"]["batch"] = batch_results
-        logger.info("Batch processing benchmark completed")
-    
-    # Calculate total execution time
-    all_results["total_execution_time"] = time.time() - start_time
-    
-    # Write results to file if specified
-    if output_file:
-        with open(output_file, 'w') as f:
-            json.dump(all_results, f, indent=2)
-        logger.info(f"Benchmark results written to {output_file}")
-    
-    return all_results
+    return results
 
-def print_summary(results: Dict[str, Any]) -> None:
-    """
-    Print a summary of benchmark results
-    
-    Args:
-        results: Dictionary with benchmark results
-    """
-    print("\n" + "="*60)
-    print("BENCHMARK SUMMARY")
-    print("="*60)
-    
-    # Print cluster info
-    if "cluster_resources" in results:
-        r = results["cluster_resources"]
-        print(f"Cluster:              {r.get('total_nodes', 0)} nodes, "
-              f"{r.get('total_cpus', 0)} CPUs, "
-              f"{r.get('total_gpus', 0)} GPUs, "
-              f"{r.get('total_memory_gb', 0):.1f} GB memory")
-    
-    print(f"Total execution time: {results.get('total_execution_time', 0):.2f} seconds")
-    print("-"*60)
-    
-    # Print CPU benchmark summary
-    if "benchmarks" in results and "cpu" in results["benchmarks"]:
-        cpu = results["benchmarks"]["cpu"]["results"]
-        print("\nCPU Benchmark:")
-        for size, result in cpu.items():
-            print(f"  - Workload {size}: "
-                  f"{result['avg_tasks_per_second']:.2f} tasks/sec, "
-                  f"{result['avg_task_time']:.2f} sec/task")
-    
-    # Print memory benchmark summary
-    if "benchmarks" in results and "memory" in results["benchmarks"]:
-        memory = results["benchmarks"]["memory"]["results"]
-        print("\nMemory Benchmark:")
-        for size, result in memory.items():
-            if "error" in result:
-                print(f"  - {size} MB: Error - {result['error']}")
-            else:
-                print(f"  - {size} MB: "
-                      f"{result['avg_mb_per_second']:.2f} MB/sec, "
-                      f"{result['avg_task_time']:.2f} sec/task")
-    
-    # Print batch benchmark summary
-    if "benchmarks" in results and "batch" in results["benchmarks"]:
-        batch = results["benchmarks"]["batch"]["results"]
-        print("\nBatch Processing Benchmark:")
-        for size, result in batch.items():
-            print(f"  - Batch size {size}: "
-                  f"{result['avg_items_per_second']:.2f} items/sec, "
-                  f"{result['avg_task_time']:.2f} sec/batch")
-    
-    print("="*60)
 
-def main():
-    parser = argparse.ArgumentParser(description="Run Ray cluster benchmarks")
-    parser.add_argument("--output", "-o", type=str, help="Output file for benchmark results")
-    parser.add_argument("--cpu", action="store_true", help="Run CPU benchmark only")
-    parser.add_argument("--memory", action="store_true", help="Run memory benchmark only")
-    parser.add_argument("--batch", action="store_true", help="Run batch processing benchmark only")
-    parser.add_argument("--all", action="store_true", help="Run all benchmarks (default)")
-    parser.add_argument("--repetitions", "-r", type=int, default=3, help="Number of repetitions for each benchmark (default: 3)")
-    args = parser.parse_args()
+def main() -> None:
+    """Main entry point for the benchmarking script."""
+    args = parse_args()
     
-    # If no specific benchmarks are selected, run all
-    run_all = args.all or not (args.cpu or args.memory or args.batch)
+    # Set log level
+    logger.setLevel(getattr(logging, args.log_level))
     
-    # Run benchmarks
+    logger.info("Starting Ray benchmarks")
+    
+    # Initialize Ray
+    if args.address:
+        logger.info(f"Connecting to Ray cluster at {args.address}")
+        ray.init(address=args.address)
+    else:
+        logger.info("Starting local Ray instance")
+        ray.init()
+    
     try:
-        results = run_all_benchmarks(
-            output_file=args.output,
-            cpu_benchmark=args.cpu or run_all,
-            memory_benchmark=args.memory or run_all,
-            batch_benchmark=args.batch or run_all,
-            repetitions=args.repetitions
-        )
+        # Run benchmarks
+        start_time = time.time()
+        results = run_benchmarks(args)
+        end_time = time.time()
+        
+        # Add total execution time
+        results["total_execution_time"] = end_time - start_time
         
         # Print summary
-        print_summary(results)
+        logger.info("Benchmark summary:")
+        for benchmark, benchmark_results in results.items():
+            if benchmark not in ["system_info", "total_execution_time"]:
+                logger.info(f"  {benchmark}: {json.dumps(benchmark_results, indent=2)}")
         
-        # Shutdown Ray
-        ray.shutdown()
+        logger.info(f"Total execution time: {results['total_execution_time']:.2f} seconds")
+        
+        # Write results to file if requested
+        if args.output:
+            with open(args.output, "w") as f:
+                json.dump(results, f, indent=2)
+            logger.info(f"Results written to {args.output}")
         
     except Exception as e:
-        logger.error(f"Error running benchmarks: {str(e)}")
-        ray.shutdown()
+        logger.error(f"Error running benchmarks: {e}")
         sys.exit(1)
+    finally:
+        # Shut down Ray
+        ray.shutdown()
+
 
 if __name__ == "__main__":
     main()
