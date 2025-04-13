@@ -9,7 +9,7 @@ This project creates a distributed computing environment that allows you to:
 1. Use a powerful machine as the head node with Cursor IDE and Claude 3.7 Sonnet integration
 2. Distribute CPU-intensive tasks (code indexing, linting, formatting, testing) across worker machines
 3. Share code and data via NFS for seamless development
-4. Monitor cluster performance via a web dashboard
+4. Monitor cluster performance via Grafana dashboards
 5. Access Claude API via a Ray-powered proxy server
 
 ## System Requirements
@@ -19,6 +19,7 @@ This project creates a distributed computing environment that allows you to:
 - Python 3.8+
 - Cursor IDE
 - 8GB+ RAM recommended
+- Docker and Docker Compose
 - Stable internet connection for Claude API
 
 ### Worker Node Requirements
@@ -42,8 +43,10 @@ sudo ./head_setup.sh
 
 This will:
 - Install required packages (Ray, FastAPI, uvicorn, etc.)
+- Install Docker and Docker Compose
 - Configure NFS server for code sharing
 - Set up Python environment with Ray
+- Set up Prometheus and Grafana for monitoring
 - Create startup scripts for the head node
 - Configure firewall rules for Ray
 
@@ -63,15 +66,21 @@ This will:
 - Configure automatic connection to the head node
 - Set up a systemd service to start Ray on boot
 
-### 3. Start the Ray Cluster
+### 3. Start the Ray Cluster and Monitoring
 
 On the head node:
 
 ```bash
+# Start the Ray head node
 ~/ray-cluster/start_head.sh
+
+# Start the monitoring stack (Prometheus + Grafana)
+~/ray-cluster/start_monitoring.sh
 ```
 
 The worker nodes should connect automatically. Verify the connection by visiting the Ray dashboard at http://head-node-ip:8265
+
+Access the Grafana monitoring dashboard at http://head-node-ip:3000 (default credentials: admin/admin)
 
 ### 4. Start the Ray Proxy Server for Claude API
 
@@ -101,6 +110,10 @@ cursor-ray-cluster-setup/
 │   ├── run_formatter.py       # Run code formatters in parallel using Ray
 │   ├── run_indexer.py         # Index code in parallel using Ray
 │   └── run_tests.py           # Run tests in parallel using Ray
+├── monitoring/                # Monitoring configuration
+│   ├── docker-compose.yml     # Docker Compose for Prometheus and Grafana
+│   ├── prometheus.yml         # Prometheus configuration
+│   └── grafana/               # Grafana dashboards and configuration
 ├── templates/                 # Web dashboard templates
 │   └── dashboard.html         # Dashboard UI
 ├── api/                       # API endpoints
@@ -150,6 +163,22 @@ ray-tests --directory ./your_project/tests --verbose
 
 Distributes test execution across the cluster.
 
+### Monitoring with Grafana and Prometheus
+
+The system includes comprehensive monitoring with pre-configured dashboards:
+
+- CPU and memory usage per node
+- Number of active/pending workers
+- Task execution metrics
+- Node health status
+
+Access the monitoring dashboard at http://head-node-ip:3000 with the default credentials (admin/admin).
+
+The monitoring stack includes:
+- **Prometheus**: For metrics collection from Ray and system resources
+- **Grafana**: For visualization and alerting
+- **Node Exporter**: For collecting system metrics from each node
+
 ### Benchmarking
 
 The system includes benchmarking tools to measure performance:
@@ -193,6 +222,20 @@ The setup can be adapted for cloud environments:
 1. Set up a head node on a cloud VM
 2. Configure security groups/firewall rules to allow Ray ports (6379, 8265, 10001-10999)
 3. Launch worker instances and run the worker setup script
+
+### Customizing Monitoring
+
+To customize Grafana dashboards:
+
+1. Log into Grafana at http://head-node-ip:3000
+2. Navigate to the Dashboards section
+3. Edit the existing Ray Cluster Dashboard or create new ones
+
+To add custom metrics:
+
+1. Edit the `prometheus.yml` file in the `monitoring` directory
+2. Add new scrape targets or jobs
+3. Restart the monitoring stack with `~/ray-cluster/stop_monitoring.sh` and `~/ray-cluster/start_monitoring.sh`
 
 ### Performance Optimization
 
@@ -249,6 +292,15 @@ If you can't access the dashboard:
 1. Check that the dashboard is running: `ps aux | grep ray::dashboard`
 2. Verify the dashboard port is open: `sudo ufw status | grep 8265`
 3. Try accessing from the head node itself: `curl localhost:8265`
+
+### Monitoring Issues
+
+If Grafana or Prometheus aren't working:
+
+1. Check Docker containers status: `docker ps`
+2. Check Docker Compose logs: `cd ~/ray-cluster/monitoring && docker-compose logs`
+3. Verify that the Ray metrics endpoint is accessible: `curl localhost:8265/api/metrics`
+4. Check if Prometheus can reach the metrics endpoint (host networking issues)
 
 ### Claude API Proxy Issues
 
