@@ -119,7 +119,8 @@ su - $USERNAME -c "python3 -m venv /home/$USERNAME/ray-env"
 # Install Ray in the virtual environment
 echo "Installing Ray..."
 su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install --upgrade pip"
-su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install 'ray[default]' pandas numpy psutil prometheus-client"
+# Install a specific stable version of Ray
+su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install 'ray[default]==2.10.0' pandas numpy psutil prometheus-client"
 
 # Configure firewall
 echo "Configuring firewall..."
@@ -141,10 +142,12 @@ ray stop
 # Clean any stale Ray directories
 rm -rf /tmp/ray
 
-# Start Ray worker - simple configuration that's known to work
+# Start Ray worker with critical parameters to ensure stable connection
 ray start --address='$HEAD_NODE_IP:6379' \\
-    --num-cpus=\$(($(($(nproc) - 1)) > 0 ? $(($(nproc) - 1)) : 1)) \\
-    --resources='{"worker_node": 1.0}'
+    --num-cpus=4 \\
+    --dashboard-agent-listen-port=0 \\
+    --resources='{"worker_node": 1.0}' \\
+    --block
 
 echo "Ray worker node started and connected to $HEAD_NODE_IP:6379"
 EOF
@@ -249,6 +252,8 @@ cat > /etc/systemd/system/ray-worker.service << EOF
 [Unit]
 Description=Ray Worker Node
 After=network.target
+StartLimitIntervalSec=500
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -257,8 +262,11 @@ WorkingDirectory=/home/$USERNAME
 ExecStartPre=/bin/bash -c "rm -rf /tmp/ray"
 ExecStart=/bin/bash /home/$USERNAME/ray-cluster/start_worker.sh
 ExecStop=/home/$USERNAME/ray-env/bin/ray stop
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=20
 Restart=on-failure
-RestartSec=10
+RestartSec=30
 
 [Install]
 WantedBy=multi-user.target
@@ -306,8 +314,10 @@ systemctl enable ray-worker.service
 systemctl start ray-worker.service
 systemctl enable node-exporter.service
 systemctl start node-exporter.service
-systemctl enable ray-watchdog.service
-systemctl start ray-watchdog.service
+
+# Don't enable/start the watchdog for now to troubleshoot the connection issues
+# systemctl enable ray-watchdog.service
+# systemctl start ray-watchdog.service
 
 echo "========================================================"
 echo "Ray worker node setup completed successfully!"
