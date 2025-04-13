@@ -78,7 +78,7 @@ chown -R $USERNAME:$USERNAME /home/$USERNAME/ray-cluster
 # Install Ray
 echo "Installing Ray..."
 pip3 install --upgrade pip
-pip3 install 'ray[default]' pandas numpy psutil prometheus-client
+pip3 install 'ray[default]' pandas numpy psutil prometheus-client --break-system-packages
 
 # Configure firewall
 echo "Configuring firewall..."
