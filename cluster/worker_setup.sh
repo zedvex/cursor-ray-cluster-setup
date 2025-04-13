@@ -97,6 +97,40 @@ else
   echo "Continuing with setup, but worker may not connect properly."
 fi
 
+# Optimize network settings for Ray
+echo "Optimizing network settings for Ray..."
+cat > /etc/sysctl.d/99-ray-network.conf << EOF
+# Increase the maximum socket buffer size
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+
+# Increase the default socket buffer size
+net.core.rmem_default=262144
+net.core.wmem_default=262144
+
+# Increase the maximum number of open files
+fs.file-max=1048576
+
+# Increase the maximum number of connection tracking entries
+net.netfilter.nf_conntrack_max=1048576
+
+# Increase the TCP max buffer size
+net.ipv4.tcp_rmem=4096 87380 16777216
+net.ipv4.tcp_wmem=4096 65536 16777216
+
+# Enable TCP window scaling
+net.ipv4.tcp_window_scaling=1
+
+# Increase the TCP maximum and default buffer sizes
+net.ipv4.tcp_mem=16777216 16777216 16777216
+
+# Disable slow start after idle
+net.ipv4.tcp_slow_start_after_idle=0
+EOF
+
+# Apply the network settings
+sysctl --system
+
 # Set up Python virtual environment
 echo "Setting up Python virtual environment..."
 su - $USERNAME -c "python3 -m venv /home/$USERNAME/ray-env"
@@ -123,11 +157,35 @@ source /home/$USERNAME/ray-env/bin/activate
 # Make sure any previous Ray instances are stopped
 ray stop
 
-# Start Ray worker with explicit connection options
+# Make sure /tmp/ray is clean
+rm -rf /tmp/ray
+
+# Configure system for Ray
+echo "net.core.rmem_max=2097152" >> /etc/sysctl.conf
+echo "net.core.wmem_max=2097152" >> /etc/sysctl.conf
+sysctl -p
+
+# Increase the timeout for heartbeats
+export RAY_timeout_ms=10000
+export RAY_ping_interval_ms=1000
+export RAY_heartbeat_timeout_milliseconds=10000
+
+# Start Ray worker with explicit connection options and adjust parameters for stability
 ray start --address='$HEAD_NODE_IP:6379' \\
     --metrics-export-port=8266 \\
-    --num-cpus=\$(nproc) \\
+    --num-cpus=\$(($(($(nproc) - 1)) > 0 ? $(($(nproc) - 1)) : 1)) \\
     --resources='{"worker_node": 1.0}' \\
+    --system-config='{
+        "raylet_heartbeat_timeout_milliseconds": 10000,
+        "ping_gcs_rpc_server_max_retries": 10,
+        "object_manager_pull_timeout_ms": 10000,
+        "object_manager_push_timeout_ms": 10000,
+        "health_check_initial_delay_ms": 10000,
+        "health_check_period_ms": 5000,
+        "health_check_timeout_ms": 2000,
+        "num_workers_soft_limit": 10,
+        "worker_max_reconnections": 100
+    }' \\
     --block
 
 echo "Ray worker node started and connected to $HEAD_NODE_IP:6379"
@@ -176,24 +234,120 @@ EOF
 chmod +x /home/$USERNAME/ray-cluster/stop_node_exporter.sh
 chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/stop_node_exporter.sh
 
-# Create a systemd service to start Ray worker on boot
-echo "Creating systemd service for Ray worker..."
-cat > /etc/systemd/system/ray-worker.service << EOF
+# Create a watchdog script to monitor the Ray connection
+echo "Creating Ray connection watchdog script..."
+cat > /home/$USERNAME/ray-cluster/ray_watchdog.sh << 'EOF'
+#!/bin/bash
+
+# Configuration
+LOG_FILE="/home/$USER/ray-cluster/watchdog.log"
+MAX_RECONNECT_ATTEMPTS=3
+RECONNECT_DELAY=30
+
+# Function to log messages
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
+
+# Initialize log
+log "Ray watchdog started"
+
+# Get the head node IP from the start_worker.sh script
+HEAD_NODE_IP=$(grep -oP "(?<=--address=')[^:']+" /home/$USER/ray-cluster/start_worker.sh)
+if [ -z "$HEAD_NODE_IP" ]; then
+  log "ERROR: Could not determine head node IP"
+  exit 1
+fi
+log "Head node IP: $HEAD_NODE_IP"
+
+while true; do
+  # Check if Ray is running
+  if ! pgrep -f "ray::raylet" > /dev/null; then
+    log "Ray process is not running. Attempting to restart service..."
+    sudo systemctl restart ray-worker
+    sleep 10
+    continue
+  fi
+  
+  # Check if worker can connect to head node
+  if ! ping -c 1 -W 2 "$HEAD_NODE_IP" > /dev/null 2>&1; then
+    log "WARNING: Cannot ping head node at $HEAD_NODE_IP"
+    # Wait and try again before taking action
+    sleep 5
+    if ! ping -c 1 -W 2 "$HEAD_NODE_IP" > /dev/null 2>&1; then
+      log "ERROR: Still cannot ping head node. Restarting Ray service..."
+      sudo systemctl restart ray-worker
+    fi
+  fi
+  
+  # Check if Ray port is accessible
+  if ! nc -z -w 2 "$HEAD_NODE_IP" 6379 > /dev/null 2>&1; then
+    log "WARNING: Cannot connect to Ray port on head node"
+    # Wait and try again before taking action
+    sleep 5
+    if ! nc -z -w 2 "$HEAD_NODE_IP" 6379 > /dev/null 2>&1; then
+      log "ERROR: Still cannot connect to Ray port. Restarting Ray service..."
+      sudo systemctl restart ray-worker
+    fi
+  fi
+  
+  # Sleep before next check
+  sleep 60
+done
+EOF
+
+chmod +x /home/$USERNAME/ray-cluster/ray_watchdog.sh
+chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/ray_watchdog.sh
+
+# Create a systemd service for the watchdog
+echo "Creating systemd service for Ray watchdog..."
+cat > /etc/systemd/system/ray-watchdog.service << EOF
 [Unit]
-Description=Ray Worker Node
-After=network.target
-StartLimitIntervalSec=0
+Description=Ray Connection Watchdog
+After=ray-worker.service
+Requires=ray-worker.service
 
 [Service]
 Type=simple
 User=$USERNAME
 WorkingDirectory=/home/$USERNAME
+ExecStart=/bin/bash /home/$USERNAME/ray-cluster/ray_watchdog.sh
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Create a systemd service to start Ray worker on boot
+echo "Creating systemd service for Ray worker..."
+cat > /etc/systemd/system/ray-worker.service << EOF
+[Unit]
+Description=Ray Worker Node
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=$USERNAME
+WorkingDirectory=/home/$USERNAME
+ExecStartPre=/bin/bash -c "rm -rf /tmp/ray"
 ExecStart=/bin/bash /home/$USERNAME/ray-cluster/start_worker.sh
 ExecStop=/home/$USERNAME/ray-env/bin/ray stop
 Restart=always
-RestartSec=10
+RestartSec=20
+LimitNOFILE=65536
+TimeoutStartSec=180
+TimeoutStopSec=60
 StandardOutput=journal
 StandardError=journal
+# Environment variables for stability
+Environment="RAY_timeout_ms=10000"
+Environment="RAY_ping_interval_ms=1000" 
+Environment="RAY_heartbeat_timeout_milliseconds=10000"
 
 [Install]
 WantedBy=multi-user.target
@@ -219,13 +373,6 @@ ExecStop=/bin/bash /home/$USERNAME/ray-cluster/stop_node_exporter.sh
 WantedBy=multi-user.target
 EOF
 
-# Enable and start the services
-systemctl daemon-reload
-systemctl enable ray-worker.service
-systemctl start ray-worker.service
-systemctl enable node-exporter.service
-systemctl start node-exporter.service
-
 # Set up authorized keys for passwordless SSH if requested
 echo "========================================================"
 echo "To enable passwordless SSH from head node, paste the head node's"
@@ -241,6 +388,15 @@ if [ ! -z "$PUBLIC_KEY" ]; then
   chown -R $USERNAME:$USERNAME /home/$USERNAME/.ssh
   echo "Public key added to authorized_keys."
 fi
+
+# Enable and start the services
+systemctl daemon-reload
+systemctl enable ray-worker.service
+systemctl start ray-worker.service
+systemctl enable node-exporter.service
+systemctl start node-exporter.service
+systemctl enable ray-watchdog.service
+systemctl start ray-watchdog.service
 
 echo "========================================================"
 echo "Ray worker node setup completed successfully!"
