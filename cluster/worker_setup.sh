@@ -42,6 +42,8 @@ apt-get update || true
 echo "Installing required packages..."
 apt-get install -y \
   python3-pip \
+  python3-venv \
+  python3-full \
   python3-dev \
   tmux \
   htop \
@@ -53,7 +55,8 @@ apt-get install -y \
   apt-transport-https \
   ca-certificates \
   gnupg \
-  lsb-release
+  lsb-release \
+  netcat-openbsd
 
 # Install Docker for node-exporter
 echo "Installing Docker..."
@@ -75,10 +78,33 @@ echo "Creating required directories..."
 mkdir -p /home/$USERNAME/ray-cluster
 chown -R $USERNAME:$USERNAME /home/$USERNAME/ray-cluster
 
-# Install Ray
+# Test connectivity to head node
+echo "Testing connectivity to head node..."
+if ping -c 3 $HEAD_NODE_IP &> /dev/null; then
+  echo "Network connectivity to head node confirmed."
+else
+  echo "WARNING: Cannot ping head node at $HEAD_NODE_IP. Please check network connectivity."
+  echo "Continuing with setup, but worker may not connect properly."
+fi
+
+# Test Ray port connectivity
+echo "Testing Ray port connectivity..."
+if nc -z -w 5 $HEAD_NODE_IP 6379; then
+  echo "Ray port connectivity confirmed."
+else
+  echo "WARNING: Cannot connect to Ray port on head node at $HEAD_NODE_IP:6379."
+  echo "Please ensure the head node has Ray running and port 6379 is open."
+  echo "Continuing with setup, but worker may not connect properly."
+fi
+
+# Set up Python virtual environment
+echo "Setting up Python virtual environment..."
+su - $USERNAME -c "python3 -m venv /home/$USERNAME/ray-env"
+
+# Install Ray in the virtual environment
 echo "Installing Ray..."
-pip3 install --upgrade pip
-pip3 install 'ray[default]' pandas numpy psutil prometheus-client --break-system-packages
+su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install --upgrade pip"
+su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install 'ray[default]' pandas numpy psutil prometheus-client"
 
 # Configure firewall
 echo "Configuring firewall..."
@@ -92,7 +118,18 @@ ufw --force enable
 echo "Creating Ray worker start script..."
 cat > /home/$USERNAME/ray-cluster/start_worker.sh << EOF
 #!/bin/bash
-ray start --address='$HEAD_NODE_IP:6379' --metrics-export-port=8266
+source /home/$USERNAME/ray-env/bin/activate
+
+# Make sure any previous Ray instances are stopped
+ray stop
+
+# Start Ray worker with explicit connection options
+ray start --address='$HEAD_NODE_IP:6379' \\
+    --metrics-export-port=8266 \\
+    --num-cpus=\$(nproc) \\
+    --resources='{"worker_node": 1.0}' \\
+    --block
+
 echo "Ray worker node started and connected to $HEAD_NODE_IP:6379"
 EOF
 
@@ -100,8 +137,9 @@ chmod +x /home/$USERNAME/ray-cluster/start_worker.sh
 chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/start_worker.sh
 
 # Create script to stop Ray
-cat > /home/$USERNAME/ray-cluster/stop_ray.sh << 'EOF'
+cat > /home/$USERNAME/ray-cluster/stop_ray.sh << EOF
 #!/bin/bash
+source /home/$USERNAME/ray-env/bin/activate
 ray stop
 echo "Ray worker node stopped"
 EOF
@@ -144,14 +182,18 @@ cat > /etc/systemd/system/ray-worker.service << EOF
 [Unit]
 Description=Ray Worker Node
 After=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=$USERNAME
 WorkingDirectory=/home/$USERNAME
 ExecStart=/bin/bash /home/$USERNAME/ray-cluster/start_worker.sh
-Restart=on-failure
-RestartSec=5
+ExecStop=/home/$USERNAME/ray-env/bin/ray stop
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
