@@ -38,7 +38,7 @@ git clone https://github.com/yourusername/cursor-ray-cluster-setup.git
 cd cursor-ray-cluster-setup
 
 # Run the head node setup script
-sudo ./head_setup.sh
+sudo ./cluster/head_setup.sh
 ```
 
 This will:
@@ -52,11 +52,11 @@ This will:
 
 ### 2. Set up Worker Nodes
 
-Copy the `worker_setup.sh` script to each worker machine and run:
+Copy the `cluster/worker_setup.sh` script to each worker machine and run:
 
 ```bash
 # Replace with your head node's IP address
-sudo ./worker_setup.sh 192.168.1.100
+sudo ./cluster/worker_setup.sh 192.168.1.100
 ```
 
 This will:
@@ -94,35 +94,39 @@ python scripts/start_ray_proxy.py
 
 ```
 cursor-ray-cluster-setup/
-├── head_setup.sh              # Setup script for head node
-├── worker_setup.sh            # Setup script for worker nodes
-├── .env.example               # Template for environment variables
-├── setup.py                   # Package setup file
-├── ray_tasks/                 # Ray task definitions
-│   ├── __init__.py
-│   ├── resource_utils.py      # Resource allocation utilities
-│   ├── task_manager.py        # Task distribution manager
-│   └── claude_api.py          # Claude API integration
-├── scripts/                   # Utility scripts
-│   ├── start_ray_proxy.py     # Script to start the Ray proxy for Claude API
-│   ├── benchmarks.py          # Benchmarking utilities for the Ray cluster
-│   ├── run_linter.py          # Run code linters in parallel using Ray
-│   ├── run_formatter.py       # Run code formatters in parallel using Ray
-│   ├── run_indexer.py         # Index code in parallel using Ray
-│   └── run_tests.py           # Run tests in parallel using Ray
-├── monitoring/                # Monitoring configuration
-│   ├── docker-compose.yml     # Docker Compose for Prometheus and Grafana
-│   ├── prometheus.yml         # Prometheus configuration
-│   └── grafana/               # Grafana dashboards and configuration
-├── templates/                 # Web dashboard templates
-│   └── dashboard.html         # Dashboard UI
-├── api/                       # API endpoints
-│   ├── __init__.py
-│   ├── proxy.py               # Claude API proxy
-│   └── dashboard.py           # Dashboard API endpoints
-├── examples/                  # Example distributed applications
-│   └── file_processing.py     # Distributed file processing example
-└── README.md                  # This file
+├── cluster/                  # Cluster setup and management
+│   ├── head_setup.sh         # Setup script for head node
+│   ├── worker_setup.sh       # Setup script for worker nodes
+│   ├── ray_start.sh          # Script to start Ray
+│   ├── ray_stop.sh           # Script to stop Ray
+│   ├── start_cluster.sh      # Script to start the entire cluster
+│   └── monitor.py            # Cluster monitoring utility
+├── scripts/                  # Utility scripts
+│   ├── start_ray_proxy.py    # Script to start the Ray proxy for Claude API
+│   ├── benchmarks.py         # Benchmarking utilities for the Ray cluster
+│   ├── run_linter.py         # Run code linters in parallel using Ray
+│   ├── run_formatter.py      # Run code formatters in parallel using Ray
+│   ├── run_indexer.py        # Index code in parallel using Ray
+│   └── run_tests.py          # Run tests in parallel using Ray
+├── ray_tasks/                # Ray task definitions
+│   ├── resource_utils.py     # Resource allocation utilities
+│   ├── task_manager.py       # Task distribution manager
+│   ├── code_indexer.py       # Code indexing functionality
+│   ├── batch_linter.py       # Batch linting functionality
+│   ├── gpt_proxy.py          # GPT/Claude API proxy functionality
+│   └── error_handling.py     # Error handling utilities
+├── examples/                 # Example distributed applications
+│   ├── file_processing.py    # Distributed file processing example
+│   ├── data_etl.py           # Data extraction/transformation/loading example
+│   ├── image_processing.py   # Image processing example
+│   └── ml_training.py        # Machine learning training example
+├── net/                      # Network configuration
+│   ├── aliases.sh            # Shell aliases for network tasks
+│   ├── setup_keys.sh         # SSH key setup script
+│   ├── ssh_config.example    # Example SSH configuration
+│   └── tmux_config           # Tmux configuration
+├── setup.py                  # Package setup file
+└── README.md                 # This file
 ```
 
 ## Features
@@ -214,7 +218,7 @@ Edit the `ray_tasks/resource_utils.py` file to customize:
 
 #### Adding More Worker Nodes
 
-Simply run the `worker_setup.sh` script on any new machine you want to add to the cluster. The head node will automatically detect and utilize the new resources.
+Simply run the `cluster/worker_setup.sh` script on any new machine you want to add to the cluster. The head node will automatically detect and utilize the new resources.
 
 #### Using Cloud Instances
 
@@ -233,7 +237,7 @@ To customize Grafana dashboards:
 
 To add custom metrics:
 
-1. Edit the `prometheus.yml` file in the `monitoring` directory
+1. Edit the `~/ray-cluster/monitoring/prometheus.yml` file
 2. Add new scrape targets or jobs
 3. Restart the monitoring stack with `~/ray-cluster/stop_monitoring.sh` and `~/ray-cluster/start_monitoring.sh`
 

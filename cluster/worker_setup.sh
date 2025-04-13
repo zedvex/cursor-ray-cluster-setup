@@ -42,11 +42,9 @@ apt-get update || true
 echo "Installing required packages..."
 apt-get install -y \
   python3-pip \
-  python3-venv \
   python3-dev \
   tmux \
   htop \
-  nfs-common \
   git \
   build-essential \
   openssh-server \
@@ -72,35 +70,15 @@ else
   echo "Docker already installed."
 fi
 
-# Create directories
+# Create ray-cluster directory
 echo "Creating required directories..."
-mkdir -p /mnt/code
 mkdir -p /home/$USERNAME/ray-cluster
-chown -R $USERNAME:$USERNAME /mnt/code
 chown -R $USERNAME:$USERNAME /home/$USERNAME/ray-cluster
 
-# Mount NFS share from head node
-echo "Setting up NFS client to mount /mnt/code..."
-if ! grep -q "$HEAD_NODE_IP:/mnt/code" /etc/fstab; then
-  echo "$HEAD_NODE_IP:/mnt/code /mnt/code nfs defaults,nofail,x-systemd.automount 0 0" >> /etc/fstab
-  echo "Added NFS mount to fstab."
-else
-  echo "NFS mount already in fstab."
-fi
-
-# Try mounting now
-echo "Mounting NFS share..."
-mount -t nfs $HEAD_NODE_IP:/mnt/code /mnt/code || echo "NFS mount failed. Will try on next reboot."
-
-# Set up Python virtual environment
-echo "Setting up Python virtual environment..."
-su - $USERNAME -c "python3 -m venv /home/$USERNAME/ray-env"
-su - $USERNAME -c "echo 'source ~/ray-env/bin/activate' >> /home/$USERNAME/.bashrc"
-
-# Install Ray in the virtual environment
+# Install Ray
 echo "Installing Ray..."
-su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install --upgrade pip"
-su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install 'ray[default]' pandas numpy psutil prometheus-client"
+pip3 install --upgrade pip
+pip3 install 'ray[default]' pandas numpy psutil prometheus-client
 
 # Configure firewall
 echo "Configuring firewall..."
@@ -114,7 +92,6 @@ ufw --force enable
 echo "Creating Ray worker start script..."
 cat > /home/$USERNAME/ray-cluster/start_worker.sh << EOF
 #!/bin/bash
-source ~/ray-env/bin/activate
 ray start --address='$HEAD_NODE_IP:6379' --metrics-export-port=8266
 echo "Ray worker node started and connected to $HEAD_NODE_IP:6379"
 EOF
@@ -125,7 +102,6 @@ chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/start_worker.sh
 # Create script to stop Ray
 cat > /home/$USERNAME/ray-cluster/stop_ray.sh << 'EOF'
 #!/bin/bash
-source ~/ray-env/bin/activate
 ray stop
 echo "Ray worker node stopped"
 EOF
