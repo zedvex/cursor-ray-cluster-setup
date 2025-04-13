@@ -119,8 +119,8 @@ su - $USERNAME -c "python3 -m venv /home/$USERNAME/ray-env"
 # Install Ray in the virtual environment
 echo "Installing Ray..."
 su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install --upgrade pip"
-# Install a specific stable version of Ray
-su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install 'ray[default]==2.10.0' pandas numpy psutil prometheus-client"
+# Install recent stable version of Ray
+su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install 'ray[default]>=2.36.0' pandas numpy psutil prometheus-client"
 
 # Configure firewall
 echo "Configuring firewall..."
