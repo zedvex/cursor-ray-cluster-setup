@@ -50,7 +50,7 @@ su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install 'r
 
 # Install system dependencies that Ray might need
 echo "Installing system dependencies for Ray..."
-apt-get install -y build-essential libgl1-mesa-glx libjpeg-dev libxrender1 libsm6 libxext6
+apt-get install -y build-essential libgl1 libjpeg-dev libxrender1 libsm6 libxext6 libx11-6
 
 # Ensure Python in virtual env has access to system site packages (may help with some dependencies)
 su - $USERNAME -c "touch /home/$USERNAME/ray-env/lib/python*/site-packages/setuptools.pth"
