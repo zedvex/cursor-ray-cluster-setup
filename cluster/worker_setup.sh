@@ -148,15 +148,39 @@ su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install --
 # Install a stable version with plasma store disabled
 su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install ray[default]==2.44.1"
 
+# Create a shared memory directory that can be used by Ray
+echo "Setting up shared memory for Ray..."
+if ! grep -q "/dev/shm" /etc/fstab; then
+  echo "Configuring shared memory mount..."
+  echo "tmpfs /dev/shm tmpfs defaults,size=1G 0 0" >> /etc/fstab
+  mount -o remount /dev/shm
+fi
+
+# Increase shared memory limits
+cat > /etc/sysctl.d/90-ray-shared-memory.conf << EOF
+# Increase shared memory limits
+kernel.shmmax=2147483648
+kernel.shmall=2097152
+EOF
+sysctl -p /etc/sysctl.d/90-ray-shared-memory.conf
+
 # Create a Ray configuration file to disable object store
 echo "Configuring Ray to disable object store..."
 mkdir -p /home/$USERNAME/.ray
 cat > /home/$USERNAME/.ray/ray.yaml << EOF
-# Configuration for Ray with minimal memory usage
-object_store_memory: 100000000  # 100MB only, minimal object store
+# Configuration for Ray with minimal memory usage and logging
+object_store_memory: 500000000  # 500MB object store
 plasma_directory: /tmp
+logging:
+  logs_dir: "/home/$USERNAME/ray-cluster/logs"
+  logs_rotation_max_bytes: 100000000
+  logs_rotation_backup_count: 5
 EOF
 chown -R $USERNAME:$USERNAME /home/$USERNAME/.ray
+
+# Create directory for logs
+mkdir -p /home/$USERNAME/ray-cluster/logs
+chown -R $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/logs
 
 # Configure firewall
 echo "Configuring firewall..."
@@ -181,9 +205,29 @@ rm -rf /tmp/ray
 mkdir -p /tmp/ray
 chmod 777 /tmp/ray
 
-# Start Ray worker with direct connection to head node
+# Create log directory
+mkdir -p ~/ray-cluster/logs
+
+# Set environment variables for debugging
+export RAY_RAYLET_VERBOSITY=10
+export RAY_verbose_spill_logs=0
+export RAY_record_ref_creation_sites=0
+export RAY_BACKEND_LOG_LEVEL=debug
+
+# Start Ray worker with direct connection to head node and capture logs
 echo "Starting Ray worker with connection to $HEAD_NODE_IP:6379"
-ray start --address=$HEAD_NODE_IP:6379 --num-cpus=4 --block
+TOTAL_MEMORY=$(free -b | grep "Mem:" | awk '{print $2}')
+OBJECT_STORE_MEMORY=$((TOTAL_MEMORY / 4))  # 25% of system memory
+
+ray start --address=$HEAD_NODE_IP:6379 \
+  --num-cpus=2 \
+  --object-store-memory=$OBJECT_STORE_MEMORY \
+  --plasma-directory=/tmp \
+  --log-to-driver \
+  --log-style=pretty \
+  --logging-level=debug \
+  --log-color=false \
+  --block 2>&1 | tee ~/ray-cluster/logs/raylet-worker-\$(date +%Y%m%d-%H%M%S).log
 EOF
 
 chmod +x /home/$USERNAME/ray-cluster/direct_worker.sh
