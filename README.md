@@ -13,12 +13,12 @@ This project creates a basic distributed computing environment that:
 ## System Requirements
 
 ### Head Node Requirements
-- Ubuntu 20.04+ or other Linux distro
+- Ubuntu 20.04+ (Desktop or Server edition)
 - Python 3.8+
 - 8GB+ RAM recommended
 
 ### Worker Node Requirements
-- Ubuntu 20.04+ or other Linux distro
+- Ubuntu 20.04+ (Server edition works great)
 - Python 3.8+
 - 4GB+ RAM
 - Network connectivity to head node
@@ -32,7 +32,7 @@ This project creates a basic distributed computing environment that:
 git clone https://github.com/yourusername/cursor-ray-cluster-setup.git
 cd cursor-ray-cluster-setup
 
-# Run the head setup script
+# Run the head setup script (must run as root/sudo)
 sudo bash cluster/head_setup.sh
 ```
 
@@ -45,21 +45,42 @@ On each worker machine:
 git clone https://github.com/yourusername/cursor-ray-cluster-setup.git
 cd cursor-ray-cluster-setup
 
-# Run the worker setup script (replace with your head node's IP)
+# Run the worker setup script with the head node IP (must run as root/sudo)
 sudo bash cluster/worker_setup.sh 192.168.1.10
 ```
+
+The setup script will handle:
+- Installing Python and dependencies
+- Creating a Python virtual environment
+- Installing Ray 2.10.0
+- Setting up a systemd service to run Ray
+- Configuring system limits
+- Starting Ray worker process
 
 ### 3. Verify Cluster Setup
 
 On the head node:
 
 ```bash
-# Check cluster status
+# Check Ray service status
 sudo systemctl status ray-head
-ray status
+
+# Check cluster status (as the user, not root)
+/home/username/ray-env/bin/ray status
 ```
 
 The Ray dashboard will be available at http://head-node-ip:8265
+
+## Ubuntu Server Notes
+
+If you're running on Ubuntu Server, our updated scripts will:
+
+1. Automatically detect the correct user to run Ray as (even when run with sudo)
+2. Use absolute paths to the Ray executable rather than relying on environment activation
+3. Set up proper environment variables in the systemd service
+4. Handle permission issues with the virtual environment
+
+If you're running on a fresh install with only the root user available, the script will warn you but set up using root (not recommended for production). Create a regular user first if possible.
 
 ## Available Tools
 
@@ -90,27 +111,27 @@ start_worker.sh: line 12: ray: command not found
 
 This means the Ray executable is not in the PATH. The setup scripts have been updated to use absolute paths, but if you're still seeing the issue:
 
-1. Verify Ray is installed in the virtual environment:
+1. Find where Ray is installed:
    ```bash
-   /home/username/ray-env/bin/ray --version
+   # Find Ray executable
+   find /home -name ray -type f -executable
    ```
 
-2. Update the start script to use the full path:
+2. Verify Ray is installed:
    ```bash
-   sudo nano ~/ray-cluster/start_worker.sh
-   # Replace "ray start" with "/home/username/ray-env/bin/ray start"
+   /path/to/ray --version
    ```
 
-3. Add the Python environment to the system service:
+3. Update the start script to use the full path:
    ```bash
-   sudo systemctl edit ray-worker
+   sudo nano /home/username/ray-cluster/start_worker.sh
+   # Replace "ray start" with "/full/path/to/ray start"
    ```
-   
-   Add:
-   ```
-   [Service]
-   Environment="PATH=/home/username/ray-env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-   Environment="PYTHONPATH=/home/username/ray-env/lib/python3.8/site-packages"
+
+4. Check for permissions issues:
+   ```bash
+   # Make ray-env directory accessible
+   sudo chmod -R 755 /home/username/ray-env
    ```
 
 ### Worker Nodes Going Offline
@@ -127,28 +148,43 @@ If worker nodes are going offline:
 
 ### Starting Worker Manually
 
-If the service approach is not working, you can manually start a worker:
+If the service approach is not working, you can start a worker manually:
 
 ```bash
 # Stop the service first
 sudo systemctl stop ray-worker
 
+# Clean up /tmp/ray directory
+sudo rm -rf /tmp/ray && mkdir -p /tmp/ray && chmod 777 /tmp/ray
+
 # Start worker manually using the full path
 /home/username/ray-env/bin/ray start --address='192.168.1.10:6379' --num-cpus=4 --block
 ```
 
-### Simplified Ray Commands
+### Service Logs
+
+To check service logs:
 
 ```bash
-# Start head node
-ray start --head --port=6379
+# Continuous log monitoring
+sudo journalctl -u ray-worker -f
 
-# Start worker node
-ray start --address='192.168.1.10:6379' --block
+# All logs for the service
+sudo journalctl -u ray-worker
+```
 
-# Stop Ray
-ray stop
+### Complete Reset
 
-# Check status
-ray status
+If you need to completely reset:
+
+```bash
+# Stop services
+sudo systemctl stop ray-worker ray-head
+
+# Remove /tmp/ray
+sudo rm -rf /tmp/ray
+
+# Start services
+sudo systemctl start ray-head  # On head node
+sudo systemctl start ray-worker  # On worker nodes
 ```
