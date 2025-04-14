@@ -166,317 +166,89 @@ ufw allow 10001/tcp     # Ray internal communication
 ufw allow 9100/tcp      # Node exporter for Prometheus
 ufw --force enable
 
-# Create a script to start Ray worker node
-echo "Creating Ray worker start script..."
-cat > /home/$USERNAME/ray-cluster/start_worker.sh << EOF
+# Create a simplified direct run script for Ray worker
+echo "Creating direct Ray worker run script..."
+cat > /home/$USERNAME/ray-cluster/direct_worker.sh << EOF
 #!/bin/bash
 
-# Basic setup
-echo "Starting Ray worker process..."
+# Stop any existing Ray processes
 source /home/$USERNAME/ray-env/bin/activate
+ray stop 2>/dev/null || true
+sleep 2
 
-# Clean temporary directory
+# Clean up Ray directory
 rm -rf /tmp/ray
 mkdir -p /tmp/ray
 chmod 777 /tmp/ray
 
-# Stop any existing Ray processes
-ray stop 2>/dev/null || true
-sleep 2
-
-# Use the absolute minimum basic command that's known to work
+# Start Ray worker with direct connection to head node
 echo "Starting Ray worker with connection to $HEAD_NODE_IP:6379"
 ray start --address=$HEAD_NODE_IP:6379 --num-cpus=4 --block
 EOF
 
-chmod +x /home/$USERNAME/ray-cluster/start_worker.sh
-chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/start_worker.sh
+chmod +x /home/$USERNAME/ray-cluster/direct_worker.sh
+chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/direct_worker.sh
 
-# Create script to stop Ray (simple version)
-cat > /home/$USERNAME/ray-cluster/stop_ray.sh << EOF
+# Create a tmux launcher script
+echo "Creating tmux launcher script..."
+cat > /home/$USERNAME/ray-cluster/start_ray_tmux.sh << EOF
+#!/bin/bash
+
+# Kill existing tmux session if it exists
+tmux kill-session -t ray-worker 2>/dev/null || true
+
+# Start a new tmux session
+tmux new-session -d -s ray-worker
+
+# Run the Ray worker script in the tmux session
+tmux send-keys -t ray-worker "cd /home/$USERNAME && ./ray-cluster/direct_worker.sh" C-m
+
+echo "Ray worker started in tmux session 'ray-worker'"
+echo "To view the session, run: tmux attach -t ray-worker"
+echo "To detach from the session (keep it running), press Ctrl+B then D"
+EOF
+
+chmod +x /home/$USERNAME/ray-cluster/start_ray_tmux.sh
+chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/start_ray_tmux.sh
+
+# Create a simple helper script to check Ray status
+cat > /home/$USERNAME/ray-cluster/check_ray.sh << EOF
 #!/bin/bash
 source /home/$USERNAME/ray-env/bin/activate
-ray stop
+ray status
 EOF
 
-chmod +x /home/$USERNAME/ray-cluster/stop_ray.sh
-chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/stop_ray.sh
+chmod +x /home/$USERNAME/ray-cluster/check_ray.sh
+chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/check_ray.sh
 
-# Start node-exporter for monitoring
-echo "Setting up node-exporter for monitoring..."
-cat > /home/$USERNAME/ray-cluster/start_node_exporter.sh << 'EOF'
-#!/bin/bash
-docker run -d \
-  --name node-exporter \
-  --restart unless-stopped \
-  --net="host" \
-  --pid="host" \
-  -v "/:/host:ro,rslave" \
-  prom/node-exporter:latest \
-  --path.rootfs=/host
-echo "Node Exporter started for Prometheus metrics collection"
-EOF
+# Stop the systemd service that's not working
+echo "Stopping and disabling systemd Ray worker service..."
+systemctl stop ray-worker.service 2>/dev/null || true
+systemctl disable ray-worker.service 2>/dev/null || true
 
-chmod +x /home/$USERNAME/ray-cluster/start_node_exporter.sh
-chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/start_node_exporter.sh
+# Set up a cron job to auto-start the worker on reboot
+echo "Setting up cron job to auto-start Ray worker on reboot..."
+CRON_JOB="@reboot /home/$USERNAME/ray-cluster/start_ray_tmux.sh > /home/$USERNAME/ray-cluster/startup.log 2>&1"
+(crontab -u $USERNAME -l 2>/dev/null || echo "") | grep -v "start_ray_tmux.sh" | { cat; echo "$CRON_JOB"; } | crontab -u $USERNAME -
 
-# Create script to stop node-exporter
-cat > /home/$USERNAME/ray-cluster/stop_node_exporter.sh << 'EOF'
-#!/bin/bash
-docker stop node-exporter
-docker rm node-exporter
-echo "Node Exporter stopped"
-EOF
-
-chmod +x /home/$USERNAME/ray-cluster/stop_node_exporter.sh
-chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/stop_node_exporter.sh
-
-# Create a simplified watchdog script to monitor the Ray connection
-echo "Creating simple Ray connection watchdog script..."
-cat > /home/$USERNAME/ray-cluster/ray_watchdog.sh << 'EOF'
-#!/bin/bash
-
-# Configuration
-LOG_FILE="/home/$USER/ray-cluster/watchdog.log"
-
-# Function to log messages
-log() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
-}
-
-# Initialize log
-log "Ray simple watchdog started"
-
-while true; do
-  # Check if Ray is running
-  if ! pgrep -f "ray::raylet" > /dev/null; then
-    log "Ray process not detected - restarting service"
-    sudo systemctl restart ray-worker
-  fi
-  
-  # Sleep for 2 minutes before next check
-  sleep 120
-done
-EOF
-
-chmod +x /home/$USERNAME/ray-cluster/ray_watchdog.sh
-chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/ray_watchdog.sh
-
-# Create a systemd service for the watchdog
-echo "Creating systemd service for Ray watchdog..."
-cat > /etc/systemd/system/ray-watchdog.service << EOF
-[Unit]
-Description=Ray Connection Watchdog
-After=ray-worker.service
-Requires=ray-worker.service
-
-[Service]
-Type=simple
-User=$USERNAME
-WorkingDirectory=/home/$USERNAME
-ExecStart=/bin/bash /home/$USERNAME/ray-cluster/ray_watchdog.sh
-Restart=always
-RestartSec=60
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Create a systemd service to start Ray worker on boot
-echo "Creating systemd service for Ray worker..."
-cat > /etc/systemd/system/ray-worker.service << EOF
-[Unit]
-Description=Ray Worker Node
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=$USERNAME
-WorkingDirectory=/home/$USERNAME
-ExecStart=/bin/bash /home/$USERNAME/ray-cluster/start_worker.sh
-ExecStop=/home/$USERNAME/ray-env/bin/ray stop
-Restart=on-failure
-RestartSec=30
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Create a helper script to prepare Ray directories with root permissions
-echo "Creating Ray directory setup script..."
-cat > /home/$USERNAME/ray-cluster/prepare_ray_dirs.sh << 'EOF'
-#!/bin/bash
-# This script is meant to be run as root (via sudo)
-rm -rf /tmp/ray
-mkdir -p /tmp/ray
-chmod -R 777 /tmp/ray
-# Get the username from the first argument
-USERNAME=$1
-if [ -n "$USERNAME" ]; then
-  chown -R $USERNAME:$USERNAME /tmp/ray
-fi
-echo "Ray directories prepared successfully"
-EOF
-
-chmod +x /home/$USERNAME/ray-cluster/prepare_ray_dirs.sh
-chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/prepare_ray_dirs.sh
-
-# Create a new log monitoring script
-echo "Creating log monitoring script..."
-cat > /home/$USERNAME/ray-cluster/monitor_ray_logs.sh << 'EOF'
-#!/bin/bash
-
-LOG_DIR="/home/$USERNAME/ray-cluster/logs"
-LAST_CHECK_FILE="/home/$USERNAME/ray-cluster/last_log_check"
-mkdir -p "$LOG_DIR"
-
-# Initialize last check time if it doesn't exist
-if [ ! -f "$LAST_CHECK_FILE" ]; then
-  date +%s > "$LAST_CHECK_FILE"
-fi
-
-# Get errors and warnings from logs since last check
-LAST_CHECK=$(cat "$LAST_CHECK_FILE")
-CURRENT_TIME=$(date +%s)
-
-# Record current time for next check
-echo "$CURRENT_TIME" > "$LAST_CHECK_FILE"
-
-# Find all log files
-LOG_FILES=$(find "$LOG_DIR" -name "ray_worker_*.log")
-
-if [ -z "$LOG_FILES" ]; then
-  echo "No log files found in $LOG_DIR"
-  exit 0
-fi
-
-# Look for important error patterns
-echo "=== Ray Worker Error Report $(date) ==="
-
-for LOG_FILE in $LOG_FILES; do
-  MODIFIED_TIME=$(stat -c %Y "$LOG_FILE")
-  if [ "$MODIFIED_TIME" -gt "$LAST_CHECK" ]; then
-    echo "--- Analyzing log file: $LOG_FILE ---"
-    
-    # Check for critical error patterns
-    grep -i -E "error|exception|fail|cannot|timeout|refused" "$LOG_FILE" | tail -n 50
-    
-    # Look for important Ray-specific messages
-    grep -i -E "ray.*dead|connection.*lost|node.*dead|raylet" "$LOG_FILE" | tail -n 50
-  fi
-done
-
-echo "=== End of Report ==="
-EOF
-
-chmod +x /home/$USERNAME/ray-cluster/monitor_ray_logs.sh
-chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/monitor_ray_logs.sh
-
-# Create a cron job to run the monitoring script
-echo "Setting up log monitoring cron job..."
-CRON_JOB="*/10 * * * * /home/$USERNAME/ray-cluster/monitor_ray_logs.sh > /home/$USERNAME/ray-cluster/logs/monitor_$(date +\%Y\%m\%d).log 2>&1"
-(crontab -u $USERNAME -l 2>/dev/null || echo "") | grep -v "monitor_ray_logs.sh" | { cat; echo "$CRON_JOB"; } | crontab -u $USERNAME -
-
-# Set up authorized keys for passwordless SSH if requested
-echo "========================================================"
-echo "To enable passwordless SSH from head node, paste the head node's"
-echo "public key when prompted (or press Enter to skip this step):"
-echo "========================================================"
-read -p "Head node's public key (or press Enter to skip): " PUBLIC_KEY
-
-if [ ! -z "$PUBLIC_KEY" ]; then
-  mkdir -p /home/$USERNAME/.ssh
-  echo "$PUBLIC_KEY" >> /home/$USERNAME/.ssh/authorized_keys
-  chmod 700 /home/$USERNAME/.ssh
-  chmod 600 /home/$USERNAME/.ssh/authorized_keys
-  chown -R $USERNAME:$USERNAME /home/$USERNAME/.ssh
-  echo "Public key added to authorized_keys."
-fi
-
-# Create a systemd service for node-exporter
-echo "Creating systemd service for node-exporter..."
-cat > /etc/systemd/system/node-exporter.service << EOF
-[Unit]
-Description=Prometheus Node Exporter
-After=docker.service
-Requires=docker.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-User=$USERNAME
-WorkingDirectory=/home/$USERNAME
-ExecStart=/bin/bash /home/$USERNAME/ray-cluster/start_node_exporter.sh
-ExecStop=/bin/bash /home/$USERNAME/ray-cluster/stop_node_exporter.sh
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Enable and start the services
-systemctl daemon-reload
-
-# Stop all Ray-related services to ensure clean start
-systemctl stop ray-worker.service ray-watchdog.service node-exporter.service 2>/dev/null || true
-systemctl disable ray-watchdog.service 2>/dev/null || true
-
-# Remove any stale Ray directories and ensure proper permissions
-echo "Setting up Ray directories with proper permissions..."
-sudo rm -rf /tmp/ray || true
-sudo mkdir -p /tmp/ray
-sudo chmod -R 777 /tmp/ray
-sudo chown -R $USERNAME:$USERNAME /tmp/ray
-# Also set up Ray directories for the user
-sudo /home/$USERNAME/ray-cluster/prepare_ray_dirs.sh $USERNAME
-
-# Enable and start the key services one at a time with proper checking
-echo "Enabling and starting node-exporter service..."
-systemctl enable node-exporter.service
-systemctl restart node-exporter.service
+# Run the Ray worker in tmux directly
+echo "Starting Ray worker in tmux session..."
+su - $USERNAME -c "/home/$USERNAME/ray-cluster/start_ray_tmux.sh"
 sleep 5
-if systemctl is-active --quiet node-exporter.service; then
-  echo "Node exporter service started successfully."
-else
-  echo "WARNING: Node exporter service failed to start properly."
-fi
 
-echo "Enabling and starting Ray worker service..."
-systemctl enable ray-worker.service
-systemctl restart ray-worker.service
-sleep 10
-if systemctl is-active --quiet ray-worker.service; then
-  echo "Ray worker service started successfully."
-else
-  echo "WARNING: Ray worker service failed to start properly. Check the logs for details."
-  journalctl -u ray-worker.service -n 50 --no-pager
-fi
-
-# Set up sudo permissions for Ray directory management
-echo "Setting up sudo permissions for Ray operations..."
-cat > /etc/sudoers.d/ray-worker << EOF
-# Allow Ray user to manage Ray directories without password
-$USERNAME ALL=(ALL) NOPASSWD: /bin/rm -rf /tmp/ray, /bin/rm -rf /tmp/ray/*
-$USERNAME ALL=(ALL) NOPASSWD: /bin/mkdir -p /tmp/ray
-$USERNAME ALL=(ALL) NOPASSWD: /bin/chmod -R 777 /tmp/ray
-$USERNAME ALL=(ALL) NOPASSWD: /bin/chown -R * /tmp/ray
-EOF
-chmod 440 /etc/sudoers.d/ray-worker
-
+# Final instructions
 echo "========================================================"
-echo "Ray worker node setup completed!"
+echo "Ray worker node setup completed with TMUX approach!"
 echo "========================================================"
 echo ""
 echo "STATUS INFORMATION:"
-echo "- Ray worker service: $(systemctl is-active ray-worker.service)"
-echo "- Ray worker service logs:"
-journalctl -u ray-worker.service -n 20 --no-pager
+echo "- Ray worker is running in a tmux session (not as a service)"
+echo "- To view the Ray worker: tmux attach -t ray-worker"
 echo ""
-echo "NEXT STEPS:"
-echo "- Check if worker appears in Ray dashboard: http://$HEAD_NODE_IP:8265"
+echo "MANAGEMENT COMMANDS:"
+echo "- Start worker:  ~/ray-cluster/start_ray_tmux.sh"
+echo "- Check status:  ~/ray-cluster/check_ray.sh"
+echo "- Stop worker:   source ~/ray-env/bin/activate && ray stop"
 echo ""
-echo "TROUBLESHOOTING COMMANDS:"
-echo "- Restart worker:       sudo systemctl restart ray-worker"
-echo "- Check worker status:  sudo systemctl status ray-worker"
-echo "- View logs:            sudo journalctl -fu ray-worker"
+echo "The worker will automatically start on reboot via cron."
 echo "========================================================"
