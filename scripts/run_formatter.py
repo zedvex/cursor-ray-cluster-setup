@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Script for running code formatters in parallel using Ray cluster.
-Supports black and isort for Python code formatting.
+Supports running black, isort, and other formatters on Python code.
 """
 
 import argparse
@@ -11,8 +11,9 @@ import os
 import subprocess
 import sys
 import time
+from glob import glob
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Any
+from typing import Dict, List, Optional, Any, Tuple, Union
 
 import ray
 
@@ -29,9 +30,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# List of supported formatters
-SUPPORTED_FORMATTERS = ["black", "isort"]
-
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Run code formatters in parallel using Ray")
@@ -45,19 +43,25 @@ def parse_args() -> argparse.Namespace:
         "--directory",
         type=str,
         default=".",
-        help="Directory to format (default: current directory)",
+        help="Directory to search for Python files (default: current directory)",
+    )
+    parser.add_argument(
+        "--include",
+        type=str,
+        default="*.py",
+        help="Glob pattern for files to include (default: *.py)",
     )
     parser.add_argument(
         "--exclude",
         type=str,
-        default="venv,env,.venv,.env,.git,__pycache__,*.pyc,*.pyo,*.pyd,build,dist",
+        default="",
         help="Comma-separated list of patterns to exclude",
     )
     parser.add_argument(
         "--formatters",
         type=str,
         default="black,isort",
-        help="Comma-separated list of formatters to use (default: black,isort)",
+        help="Comma-separated list of formatters to run (default: black,isort)",
     )
     parser.add_argument(
         "--black-line-length",
@@ -69,12 +73,17 @@ def parse_args() -> argparse.Namespace:
         "--isort-profile",
         type=str,
         default="black",
-        help="Profile for isort formatter (default: black)",
+        help="Profile for isort (default: black)",
     )
     parser.add_argument(
-        "--check-only",
+        "--check",
         action="store_true",
-        help="Only check if files would be reformatted, don't modify them",
+        help="Run formatters in check mode (don't modify files)",
+    )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Enable verbose output",
     )
     parser.add_argument(
         "--output",
@@ -82,121 +91,138 @@ def parse_args() -> argparse.Namespace:
         help="Output file for formatting results (default: stdout)",
     )
     parser.add_argument(
-        "--verbose",
+        "--debug",
         action="store_true",
-        help="Enable verbose logging",
+        help="Enable debug logging",
     )
     return parser.parse_args()
 
-def find_python_files(directory: str, exclude_patterns: List[str]) -> List[str]:
+def find_python_files(directory: str, include_pattern: str, exclude_patterns: List[str]) -> List[str]:
     """Find all Python files in a directory, excluding specified patterns."""
-    python_files = []
-    exclude_dirs = set()
+    all_files = glob(os.path.join(directory, "**", include_pattern), recursive=True)
     
-    # Process exclude patterns for directories
-    for pattern in exclude_patterns:
-        if not pattern.startswith("*."):
-            exclude_dirs.add(pattern)
+    # Filter out excluded files
+    if exclude_patterns:
+        filtered_files = []
+        for file_path in all_files:
+            if not any(
+                exclude_pattern in file_path
+                for exclude_pattern in exclude_patterns
+            ):
+                filtered_files.append(file_path)
+        files = filtered_files
+    else:
+        files = all_files
     
-    for root, dirs, files in os.walk(directory):
-        # Skip excluded directories
-        dirs[:] = [d for d in dirs if d not in exclude_dirs and not any(
-            os.path.join(root, d).startswith(os.path.join(directory, excl))
-            for excl in exclude_dirs
-        )]
-        
-        for file in files:
-            if file.endswith(".py"):
-                file_path = os.path.join(root, file)
-                # Check if file matches any exclude pattern
-                if not any(
-                    pattern.startswith("*.") and file.endswith(pattern[1:])
-                    for pattern in exclude_patterns
-                ):
-                    python_files.append(file_path)
+    # Sort files for consistent ordering
+    files.sort()
     
-    logger.info(f"Found {len(python_files)} Python files to format")
-    return python_files
+    logger.info(f"Found {len(files)} Python files to format")
+    return files
 
 @ray.remote
-def format_file(file_path: str, formatters: List[str], check_only: bool, 
-                black_line_length: int, isort_profile: str) -> Dict[str, Any]:
-    """Format a Python file using the specified formatters."""
+def format_file(
+    file_path: str,
+    formatters: List[str],
+    check_mode: bool = False,
+    black_line_length: int = 88,
+    isort_profile: str = "black",
+    verbose: bool = False,
+) -> Dict[str, Any]:
+    """Format a single file using specified formatters."""
+    start_time = time.time()
     result = {
         "file": file_path,
         "formatters": {},
         "success": True,
-        "changed": False,
+        "duration": 0,
+        "errors": [],
     }
     
     for formatter in formatters:
         formatter_result = {
-            "success": True,
+            "success": False,
             "output": "",
             "error": "",
-            "changed": False,
+            "modified": False,
         }
         
         try:
             if formatter == "black":
                 cmd = ["black"]
-                if check_only:
+                if check_mode:
                     cmd.append("--check")
-                cmd.extend(["--line-length", str(black_line_length), file_path])
+                cmd.extend(["--line-length", str(black_line_length)])
+                if verbose:
+                    cmd.append("--verbose")
+                cmd.append(file_path)
                 
             elif formatter == "isort":
                 cmd = ["isort"]
-                if check_only:
+                if check_mode:
                     cmd.append("--check")
-                cmd.extend(["--profile", isort_profile, file_path])
+                cmd.extend(["--profile", isort_profile])
+                if verbose:
+                    cmd.append("--verbose")
+                cmd.append(file_path)
+                
+            elif formatter == "autopep8":
+                cmd = ["autopep8"]
+                if not check_mode:
+                    cmd.append("--in-place")
+                cmd.extend(["--max-line-length", str(black_line_length)])
+                if verbose:
+                    cmd.append("--verbose")
+                cmd.append(file_path)
                 
             elif formatter == "yapf":
                 cmd = ["yapf"]
-                if check_only:
-                    cmd.append("--diff")
-                else:
+                if not check_mode:
                     cmd.append("--in-place")
+                if verbose:
+                    cmd.append("--verbose")
                 cmd.append(file_path)
                 
             else:
-                formatter_result["success"] = False
-                formatter_result["error"] = f"Unknown formatter: {formatter}"
-                result["formatters"][formatter] = formatter_result
-                result["success"] = False
-                continue
+                raise ValueError(f"Unsupported formatter: {formatter}")
             
             # Run the formatter
             process = subprocess.run(
-                cmd, 
-                capture_output=True, 
+                cmd,
+                capture_output=True,
                 text=True,
                 check=False
             )
             
-            if process.returncode == 0:
-                formatter_result["output"] = process.stdout.strip()
-                formatter_result["changed"] = False
-            else:
-                # If check_only is True, non-zero return code might just mean formatting is needed
-                if check_only and formatter in ["black", "isort"]:
-                    formatter_result["output"] = process.stdout.strip()
-                    formatter_result["error"] = process.stderr.strip()
-                    formatter_result["changed"] = True
-                    formatter_result["success"] = True
-                else:
-                    formatter_result["output"] = process.stdout.strip()
-                    formatter_result["error"] = process.stderr.strip()
-                    formatter_result["success"] = False
+            formatter_result["output"] = process.stdout
+            formatter_result["error"] = process.stderr
             
-            if formatter_result["changed"]:
-                result["changed"] = True
+            # Check if the file was modified or would be modified
+            if process.returncode == 0:
+                formatter_result["success"] = True
+                # In check mode, no modifications means exit code 0
+                formatter_result["modified"] = False
+            elif process.returncode == 1 and check_mode:
+                # In check mode, exit code 1 means the file would be modified
+                formatter_result["success"] = True
+                formatter_result["modified"] = True
+            else:
+                # Any other exit code is an error
+                formatter_result["success"] = False
+                result["success"] = False
+                result["errors"].append(f"{formatter} failed: {process.stderr}")
                 
         except Exception as e:
             formatter_result["success"] = False
             formatter_result["error"] = str(e)
             result["success"] = False
+            result["errors"].append(f"{formatter} exception: {str(e)}")
         
+        # Add results for this formatter
         result["formatters"][formatter] = formatter_result
+    
+    # Record duration
+    result["duration"] = time.time() - start_time
     
     return result
 
@@ -204,38 +230,59 @@ def aggregate_format_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Aggregate formatting results from multiple files."""
     aggregate = {
         "total_files": len(results),
-        "successfully_formatted": 0,
-        "failed_formatting": 0,
-        "files_changed": 0,
+        "successful_files": 0,
+        "failed_files": 0,
+        "modified_files": 0,
+        "would_modify_files": 0,
+        "total_duration": 0,
         "formatter_stats": {},
         "file_results": results,
     }
     
+    # Initialize formatter stats
+    formatters_used = set()
+    for result in results:
+        formatters_used.update(result["formatters"].keys())
+    
+    for formatter in formatters_used:
+        aggregate["formatter_stats"][formatter] = {
+            "successful": 0,
+            "failed": 0,
+            "modified": 0,
+            "would_modify": 0,
+        }
+    
+    # Process results
     for result in results:
         if result["success"]:
-            aggregate["successfully_formatted"] += 1
+            aggregate["successful_files"] += 1
         else:
-            aggregate["failed_formatting"] += 1
+            aggregate["failed_files"] += 1
         
-        if result["changed"]:
-            aggregate["files_changed"] += 1
+        aggregate["total_duration"] += result["duration"]
         
-        # Aggregate per-formatter statistics
+        file_modified = False
         for formatter, formatter_result in result["formatters"].items():
-            if formatter not in aggregate["formatter_stats"]:
-                aggregate["formatter_stats"][formatter] = {
-                    "success": 0,
-                    "failure": 0,
-                    "files_changed": 0,
-                }
+            stats = aggregate["formatter_stats"][formatter]
             
             if formatter_result["success"]:
-                aggregate["formatter_stats"][formatter]["success"] += 1
+                stats["successful"] += 1
             else:
-                aggregate["formatter_stats"][formatter]["failure"] += 1
+                stats["failed"] += 1
             
-            if formatter_result["changed"]:
-                aggregate["formatter_stats"][formatter]["files_changed"] += 1
+            if formatter_result["modified"]:
+                if "check" in result and result["check"]:
+                    stats["would_modify"] += 1
+                    file_modified = True
+                else:
+                    stats["modified"] += 1
+                    file_modified = True
+        
+        if file_modified:
+            if "check" in result and result["check"]:
+                aggregate["would_modify_files"] += 1
+            else:
+                aggregate["modified_files"] += 1
     
     return aggregate
 
@@ -248,44 +295,45 @@ def write_results_to_file(results: Dict[str, Any], output_file: str) -> None:
     except Exception as e:
         logger.error(f"Failed to write results to {output_file}: {e}")
 
-def print_summary(results: Dict[str, Any], check_only: bool) -> None:
+def print_summary(results: Dict[str, Any], check_mode: bool) -> None:
     """Print a summary of the formatting results."""
     logger.info("\nFormatting Summary:")
     logger.info("------------------")
-    logger.info(f"Total files: {results['total_files']}")
+    logger.info(f"Total files processed: {results['total_files']}")
+    logger.info(f"Successfully processed files: {results['successful_files']}")
+    logger.info(f"Failed files: {results['failed_files']}")
     
-    if check_only:
-        logger.info(f"Files that would be reformatted: {results['files_changed']}")
-        logger.info(f"Files that would be left unchanged: {results['total_files'] - results['files_changed']}")
+    if check_mode:
+        logger.info(f"Files that would be modified: {results['would_modify_files']}")
     else:
-        logger.info(f"Files successfully formatted: {results['successfully_formatted']}")
-        logger.info(f"Files with formatting errors: {results['failed_formatting']}")
-        logger.info(f"Files changed: {results['files_changed']}")
+        logger.info(f"Files modified: {results['modified_files']}")
     
-    logger.info("\nFormatter Statistics:")
+    logger.info(f"Total duration: {results['total_duration']:.2f} seconds")
+    
+    logger.info("\nFormatter Stats:")
     for formatter, stats in results["formatter_stats"].items():
-        if check_only:
-            logger.info(f"  {formatter}: {stats['files_changed']} files would be reformatted")
+        logger.info(f"  {formatter}:")
+        logger.info(f"    Successful: {stats['successful']}")
+        logger.info(f"    Failed: {stats['failed']}")
+        if check_mode:
+            logger.info(f"    Would modify: {stats['would_modify']}")
         else:
-            logger.info(f"  {formatter}: {stats['success']} successes, {stats['failure']} failures, {stats['files_changed']} files changed")
+            logger.info(f"    Modified: {stats['modified']}")
     
     # Print files with errors if any
-    if results['failed_formatting'] > 0:
-        logger.info("\nFiles with formatting errors:")
+    if results['failed_files'] > 0:
+        logger.info("\nFiles with errors:")
         for file_result in results['file_results']:
             if not file_result['success']:
-                logger.info(f"  {file_result['file']}")
-                for formatter, formatter_result in file_result['formatters'].items():
-                    if not formatter_result['success']:
-                        error_msg = formatter_result['error']
-                        if error_msg:
-                            logger.info(f"    {formatter}: {error_msg.split(os.linesep)[0]}")  # Only first line of error
+                logger.info(f"  {file_result['file']}:")
+                for error in file_result['errors']:
+                    logger.info(f"    {error}")
 
 def main() -> int:
     """Main entry point for the formatting script."""
     args = parse_args()
     
-    if args.verbose:
+    if args.debug:
         logger.setLevel(logging.DEBUG)
     
     # Convert directory to absolute path
@@ -295,38 +343,40 @@ def main() -> int:
         logger.error(f"Directory {directory} does not exist or is not a directory")
         return 1
     
-    # Parse formatters
-    formatters = args.formatters.split(",")
-    logger.info(f"Using formatters: {', '.join(formatters)}")
-    
-    # Parse exclude patterns
-    exclude_patterns = args.exclude.split(",")
+    # Parse formatters and exclude patterns
+    formatters = args.formatters.split(",") if args.formatters else ["black", "isort"]
+    exclude_patterns = args.exclude.split(",") if args.exclude else []
     
     # Initialize Ray
     try:
         ray.init(address=args.ray_address)
         logger.info(f"Connected to Ray cluster at {args.ray_address}")
+        
+        # Get cluster resources for logging
+        resources = get_cluster_resources()
+        logger.info(f"Cluster resources: {resources}")
+        
     except Exception as e:
         logger.error(f"Failed to connect to Ray cluster: {e}")
         return 1
     
     try:
         # Find Python files
-        python_files = find_python_files(directory, exclude_patterns)
-        logger.info(f"Found {len(python_files)} Python files to format")
+        python_files = find_python_files(directory, args.include, exclude_patterns)
         
         if not python_files:
             logger.info("No Python files found. Exiting.")
             return 0
         
-        # Format files in parallel
+        # Run formatters in parallel
         format_tasks = [
             format_file.remote(
-                file_path, 
-                formatters, 
-                args.check_only,
+                file_path,
+                formatters,
+                args.check,
                 args.black_line_length,
-                args.isort_profile
+                args.isort_profile,
+                args.verbose
             )
             for file_path in python_files
         ]
@@ -336,20 +386,21 @@ def main() -> int:
         
         # Aggregate results
         aggregated_results = aggregate_format_results(format_results)
+        aggregated_results["check"] = args.check
         
         # Print summary
-        print_summary(aggregated_results, args.check_only)
+        print_summary(aggregated_results, args.check)
         
         # Write results to file if specified
         if args.output:
             write_results_to_file(aggregated_results, args.output)
         
         # Return appropriate exit code
-        if args.check_only and aggregated_results["files_changed"] > 0:
-            logger.info("Check failed: some files would be reformatted")
+        if aggregated_results["failed_files"] > 0:
+            logger.info("Some files failed formatting")
             return 1
-        elif not args.check_only and aggregated_results["failed_formatting"] > 0:
-            logger.info("Formatting failed for some files")
+        elif args.check and aggregated_results["would_modify_files"] > 0:
+            logger.info("Some files would be modified")
             return 1
         
         return 0
@@ -363,4 +414,4 @@ def main() -> int:
         logger.info("Ray shutdown complete")
 
 if __name__ == "__main__":
-    exit(main())
+    sys.exit(main())
