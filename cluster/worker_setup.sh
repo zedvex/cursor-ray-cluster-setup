@@ -183,12 +183,25 @@ ray stop 2>/dev/null || true
 sleep 5
 
 # Clean up any stale Ray directories
-echo "[$(date)] Cleaning stale Ray directories..."
-rm -rf /tmp/ray
-# Ensure proper permissions for Ray directories
-echo "[$(date)] Setting up Ray directories with proper permissions..."
-mkdir -p /tmp/ray
-chmod -R 777 /tmp/ray
+echo "[$(date)] Handling Ray temporary directories..."
+if [ -d "/tmp/ray" ]; then
+  echo "[$(date)] Found existing Ray directory, checking permissions..."
+  if ! [ -w "/tmp/ray" ]; then
+    echo "[$(date)] WARNING: Cannot write to /tmp/ray, trying with sudo..."
+    sudo rm -rf /tmp/ray || true
+    sudo mkdir -p /tmp/ray
+    sudo chmod -R 777 /tmp/ray
+    sudo chown -R $(whoami):$(whoami) /tmp/ray
+  else
+    echo "[$(date)] Cleaning existing Ray directory..."
+    rm -rf /tmp/ray/* 2>/dev/null || true
+  fi
+else
+  echo "[$(date)] Creating new Ray directory..."
+  mkdir -p /tmp/ray
+fi
+echo "[$(date)] Setting Ray directory permissions..."
+chmod -R 777 /tmp/ray 2>/dev/null || sudo chmod -R 777 /tmp/ray
 
 # Set Ray environment variables
 echo "[$(date)] Setting Ray environment variables..."
@@ -318,8 +331,8 @@ StartLimitBurst=10
 Type=simple
 User=$USERNAME
 WorkingDirectory=/home/$USERNAME
-# Clean up before starting
-ExecStartPre=/bin/bash -c "rm -rf /tmp/ray && mkdir -p /tmp/ray && chmod 777 /tmp/ray"
+# Clean up before starting - using script to handle permissions properly
+ExecStartPre=/bin/bash -c "sudo rm -rf /tmp/ray || true; sudo mkdir -p /tmp/ray; sudo chmod 777 /tmp/ray; sudo chown $USERNAME:$USERNAME /tmp/ray"
 ExecStartPre=/home/$USERNAME/ray-env/bin/ray stop || true
 ExecStart=/bin/bash /home/$USERNAME/ray-cluster/start_worker.sh
 ExecStop=/home/$USERNAME/ray-env/bin/ray stop
@@ -436,10 +449,13 @@ systemctl stop ray-worker.service ray-watchdog.service node-exporter.service 2>/
 systemctl disable ray-watchdog.service 2>/dev/null || true
 
 # Remove any stale Ray directories and ensure proper permissions
-rm -rf /tmp/ray
-mkdir -p /tmp/ray
-chmod -R 777 /tmp/ray
-su - $USERNAME -c "rm -rf /tmp/ray"
+echo "Setting up Ray directories with proper permissions..."
+sudo rm -rf /tmp/ray || true
+sudo mkdir -p /tmp/ray
+sudo chmod -R 777 /tmp/ray
+sudo chown -R $USERNAME:$USERNAME /tmp/ray
+# Also set up Ray directories for the user
+su - $USERNAME -c "rm -rf /tmp/ray 2>/dev/null || true"
 su - $USERNAME -c "mkdir -p /tmp/ray"
 
 # Enable and start the key services one at a time with proper checking
@@ -463,6 +479,17 @@ else
   echo "WARNING: Ray worker service failed to start properly. Check the logs for details."
   journalctl -u ray-worker.service -n 50 --no-pager
 fi
+
+# Set up sudo permissions for Ray directory management
+echo "Setting up sudo permissions for Ray operations..."
+cat > /etc/sudoers.d/ray-worker << EOF
+# Allow Ray user to manage Ray directories without password
+$USERNAME ALL=(ALL) NOPASSWD: /bin/rm -rf /tmp/ray*
+$USERNAME ALL=(ALL) NOPASSWD: /bin/mkdir -p /tmp/ray*
+$USERNAME ALL=(ALL) NOPASSWD: /bin/chmod -R 777 /tmp/ray*
+$USERNAME ALL=(ALL) NOPASSWD: /bin/chown -R $USERNAME:$USERNAME /tmp/ray*
+EOF
+chmod 440 /etc/sudoers.d/ray-worker
 
 echo "========================================================"
 echo "Ray worker node setup completed!"
