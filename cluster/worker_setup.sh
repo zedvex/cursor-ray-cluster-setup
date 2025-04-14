@@ -139,7 +139,7 @@ su - $USERNAME -c "python3 -m venv /home/$USERNAME/ray-env"
 echo "Installing Ray..."
 su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install --upgrade pip"
 # Install the latest Ray version that's compatible with Python 3.12 with exact dependencies that work well together
-su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install ray[default]==2.42.0 pandas==2.1.1 numpy==1.26.1 psutil==5.9.6 prometheus-client==0.17.1"
+su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install ray[default]==2.44.1 pandas==2.1.1 numpy==1.26.1 psutil==5.9.6 prometheus-client==0.17.1"
 
 # Configure firewall
 echo "Configuring firewall..."
