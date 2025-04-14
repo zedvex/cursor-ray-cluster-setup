@@ -138,8 +138,8 @@ su - $USERNAME -c "python3 -m venv /home/$USERNAME/ray-env"
 # Install Ray in the virtual environment
 echo "Installing Ray..."
 su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install --upgrade pip"
-# Install the latest Ray version that's compatible with Python 3.12
-su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install 'ray[default]==2.44.0' pandas numpy psutil prometheus-client"
+# Install the latest Ray version that's compatible with Python 3.12 with exact dependencies that work well together
+su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install ray[default]==2.42.0 pandas==2.1.1 numpy==1.26.1 psutil==5.9.6 prometheus-client==0.17.1"
 
 # Configure firewall
 echo "Configuring firewall..."
@@ -157,21 +157,48 @@ cat > /home/$USERNAME/ray-cluster/start_worker.sh << EOF
 # Create log directory
 LOG_DIR="/home/$USERNAME/ray-cluster/logs"
 mkdir -p \$LOG_DIR
+LOG_FILE="\$LOG_DIR/ray_worker_\$(date +%Y%m%d_%H%M%S).log"
+exec > >(tee -a "\$LOG_FILE") 2>&1
 
-# Activate the virtual environment
+echo "[$(date)] Starting Ray worker process..."
 source /home/$USERNAME/ray-env/bin/activate
 
+# Create trap to handle termination signals properly
+graceful_exit() {
+  echo "[$(date)] Received termination signal - shutting down Ray gracefully..."
+  # Give Ray time to complete any pending tasks
+  sleep 5
+  ray stop
+  echo "[$(date)] Ray worker stopped gracefully"
+  exit 0
+}
+
+# Set up signal traps
+trap graceful_exit SIGTERM SIGINT
+
 # Stop any existing Ray processes
+echo "[$(date)] Stopping any existing Ray processes..."
 ray stop 2>/dev/null || true
-sleep 2
+sleep 5
 
 # Clean up any stale Ray directories
+echo "[$(date)] Cleaning stale Ray directories..."
 rm -rf /tmp/ray
 
-# Start Ray worker in the most basic way
-# The --block flag ensures it stays in the foreground
-echo "Starting Ray worker with connection to $HEAD_NODE_IP:6379"
-ray start --address='$HEAD_NODE_IP:6379' --num-cpus=4 --block
+# Start Ray worker
+echo "[$(date)] Starting Ray worker with connection to $HEAD_NODE_IP:6379"
+ray start --address='$HEAD_NODE_IP:6379' \
+  --num-cpus=4 \
+  --dashboard-agent-listen-port=0 \
+  --system-config='{"raylet_graceful_shutdown_ms": 60000, "raylet_heartbeat_timeout_milliseconds": 120000}' \
+  --block &
+
+# Store the Ray process PID
+RAY_PID=\$!
+
+# Wait for the Ray process to exit
+wait \$RAY_PID
+echo "[$(date)] Ray worker process exited with code \$?"
 EOF
 
 chmod +x /home/$USERNAME/ray-cluster/start_worker.sh
@@ -274,15 +301,22 @@ cat > /etc/systemd/system/ray-worker.service << EOF
 Description=Ray Worker Node
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=3600
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=$USERNAME
 WorkingDirectory=/home/$USERNAME
 ExecStart=/bin/bash /home/$USERNAME/ray-cluster/start_worker.sh
-ExecStop=/home/$USERNAME/ray-env/bin/ray stop
-Restart=always
-RestartSec=10
+ExecStop=/bin/bash -c "/home/$USERNAME/ray-env/bin/ray stop; sleep 10"
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStartSec=120
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=60
+SuccessExitStatus=0 143
 
 [Install]
 WantedBy=multi-user.target
