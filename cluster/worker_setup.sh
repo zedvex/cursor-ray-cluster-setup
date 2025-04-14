@@ -163,18 +163,19 @@ exec > >(tee -a "\$LOG_FILE") 2>&1
 echo "[$(date)] Starting Ray worker process..."
 source /home/$USERNAME/ray-env/bin/activate
 
-# Create trap to handle termination signals properly
-graceful_exit() {
-  echo "[$(date)] Received termination signal - shutting down Ray gracefully..."
-  # Give Ray time to complete any pending tasks
-  sleep 5
-  ray stop
-  echo "[$(date)] Ray worker stopped gracefully"
-  exit 0
-}
+# Make sure we can reach the head node
+echo "[$(date)] Checking connectivity to head node at $HEAD_NODE_IP..."
+if ! ping -c 3 $HEAD_NODE_IP &> /dev/null; then
+  echo "[$(date)] ERROR: Cannot ping head node at $HEAD_NODE_IP"
+  exit 1
+fi
 
-# Set up signal traps
-trap graceful_exit SIGTERM SIGINT
+# Check Ray port connectivity
+echo "[$(date)] Checking Ray port on head node..."
+if ! nc -z -w 5 $HEAD_NODE_IP 6379; then
+  echo "[$(date)] ERROR: Cannot connect to Ray port on head node at $HEAD_NODE_IP:6379"
+  exit 1
+fi
 
 # Stop any existing Ray processes
 echo "[$(date)] Stopping any existing Ray processes..."
@@ -184,20 +185,29 @@ sleep 5
 # Clean up any stale Ray directories
 echo "[$(date)] Cleaning stale Ray directories..."
 rm -rf /tmp/ray
+# Ensure proper permissions for Ray directories
+echo "[$(date)] Setting up Ray directories with proper permissions..."
+mkdir -p /tmp/ray
+chmod -R 777 /tmp/ray
 
-# Start Ray worker
+# Set Ray environment variables
+echo "[$(date)] Setting Ray environment variables..."
+export RAY_DISABLE_CONNECTION_ISSUE_DETECTION=1
+export RAY_BACKEND_LOG_LEVEL=debug
+export RAY_TIMEOUT_MS=120000
+export RAY_RAYLET_STARTUP_RETRY=10
+export RAY_RAYLET_RETRY_TIMEOUT_MS=10000
+export RAY_verbose_spill_logs=0
+export RAY_record_ref_creation_sites=0
+
+# Start Ray worker - running directly without background
 echo "[$(date)] Starting Ray worker with connection to $HEAD_NODE_IP:6379"
-ray start --address='$HEAD_NODE_IP:6379' \
+exec ray start --address='$HEAD_NODE_IP:6379' \
   --num-cpus=4 \
-  --dashboard-agent-listen-port=0 \
-  --block &
-
-# Store the Ray process PID
-RAY_PID=\$!
-
-# Wait for the Ray process to exit
-wait \$RAY_PID
-echo "[$(date)] Ray worker process exited with code \$?"
+  --resources='{"worker": 1.0}' \
+  --log-style=record \
+  --log-to-driver \
+  --block
 EOF
 
 chmod +x /home/$USERNAME/ray-cluster/start_worker.sh
@@ -298,24 +308,29 @@ echo "Creating systemd service for Ray worker..."
 cat > /etc/systemd/system/ray-worker.service << EOF
 [Unit]
 Description=Ray Worker Node
-After=network-online.target
+After=network-online.target docker.service
 Wants=network-online.target
-StartLimitIntervalSec=3600
-StartLimitBurst=5
+Conflicts=shutdown.target reboot.target halt.target
+StartLimitIntervalSec=5400
+StartLimitBurst=10
 
 [Service]
 Type=simple
 User=$USERNAME
 WorkingDirectory=/home/$USERNAME
+# Clean up before starting
+ExecStartPre=/bin/bash -c "rm -rf /tmp/ray && mkdir -p /tmp/ray && chmod 777 /tmp/ray"
+ExecStartPre=/home/$USERNAME/ray-env/bin/ray stop || true
 ExecStart=/bin/bash /home/$USERNAME/ray-cluster/start_worker.sh
-ExecStop=/bin/bash -c "/home/$USERNAME/ray-env/bin/ray stop; sleep 10"
-KillMode=mixed
+ExecStop=/home/$USERNAME/ray-env/bin/ray stop
+KillMode=process
 KillSignal=SIGTERM
-TimeoutStartSec=120
-TimeoutStopSec=120
-Restart=on-failure
-RestartSec=60
-SuccessExitStatus=0 143
+SendSIGKILL=yes
+TimeoutStartSec=180
+TimeoutStopSec=90
+Restart=always
+RestartSec=90
+SuccessExitStatus=0 143 137
 
 [Install]
 WantedBy=multi-user.target
@@ -420,15 +435,34 @@ systemctl daemon-reload
 systemctl stop ray-worker.service ray-watchdog.service node-exporter.service 2>/dev/null || true
 systemctl disable ray-watchdog.service 2>/dev/null || true
 
-# Remove any stale Ray directories
+# Remove any stale Ray directories and ensure proper permissions
 rm -rf /tmp/ray
+mkdir -p /tmp/ray
+chmod -R 777 /tmp/ray
 su - $USERNAME -c "rm -rf /tmp/ray"
+su - $USERNAME -c "mkdir -p /tmp/ray"
 
-# Enable and start the key services
-systemctl enable ray-worker.service
-systemctl restart ray-worker.service
+# Enable and start the key services one at a time with proper checking
+echo "Enabling and starting node-exporter service..."
 systemctl enable node-exporter.service
 systemctl restart node-exporter.service
+sleep 5
+if systemctl is-active --quiet node-exporter.service; then
+  echo "Node exporter service started successfully."
+else
+  echo "WARNING: Node exporter service failed to start properly."
+fi
+
+echo "Enabling and starting Ray worker service..."
+systemctl enable ray-worker.service
+systemctl restart ray-worker.service
+sleep 10
+if systemctl is-active --quiet ray-worker.service; then
+  echo "Ray worker service started successfully."
+else
+  echo "WARNING: Ray worker service failed to start properly. Check the logs for details."
+  journalctl -u ray-worker.service -n 50 --no-pager
+fi
 
 echo "========================================================"
 echo "Ray worker node setup completed!"
