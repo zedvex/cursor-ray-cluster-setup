@@ -137,6 +137,9 @@ echo "Creating direct Ray worker run script..."
 cat > /home/$USERNAME/ray-cluster/direct_worker.sh << EOF
 #!/bin/bash
 
+# Ensure we're always in the virtual environment
+source /home/$USERNAME/ray-env/bin/activate
+
 # Set up error handling
 set -e
 trap 'echo "Error on line \$LINENO. Exit code: \$?" >> ~/ray-cluster/logs/error.log' ERR
@@ -149,9 +152,10 @@ ERROR_FILE=~/ray-cluster/logs/raylet-error-\$(date +%Y%m%d-%H%M%S).log
 echo "================ Starting Ray Worker =================" | tee -a \$LOG_FILE
 echo "Start time: \$(date)" | tee -a \$LOG_FILE
 echo "Head node: $HEAD_NODE_IP:6379" | tee -a \$LOG_FILE
+echo "Python version: \$(python --version)" | tee -a \$LOG_FILE
+echo "Ray version: \$(pip show ray | grep Version)" | tee -a \$LOG_FILE
 
 # Stop any existing Ray processes
-source /home/$USERNAME/ray-env/bin/activate
 echo "Stopping any existing Ray processes..." | tee -a \$LOG_FILE
 ray stop 2>&1 | tee -a \$LOG_FILE || echo "No Ray processes to stop" | tee -a \$LOG_FILE
 sleep 5
@@ -168,6 +172,21 @@ free -h | tee -a \$LOG_FILE
 df -h | tee -a \$LOG_FILE
 
 # Very important - set stable environment variables for heartbeat and connectivity
+# All environment variables are set in .bashrc to ensure they're available in cron jobs too
+echo "Setting persistent Ray environment variables in .bashrc..."
+grep -v "RAY_" ~/.bashrc > ~/.bashrc.tmp
+cat >> ~/.bashrc.tmp << 'RAYENV'
+# Ray environment variables for stable connections
+export RAY_HEARTBEAT_TIMEOUT_MILLISECONDS=60000
+export RAY_NUM_HEARTBEATS_TIMEOUT=60
+export RAY_TIMEOUT_MS=60000
+export RAY_REDIS_ADDRESS="$HEAD_NODE_IP:6379"
+export RAY_head_args="--redis-password= --num-cpus=0"
+RAYENV
+mv ~/.bashrc.tmp ~/.bashrc
+source ~/.bashrc
+
+# Load Ray environment variables for this session
 export RAY_HEARTBEAT_TIMEOUT_MILLISECONDS=60000
 export RAY_NUM_HEARTBEATS_TIMEOUT=60
 export RAY_TIMEOUT_MS=60000
@@ -256,6 +275,43 @@ sleep 30
 # Check if worker is running
 echo "Checking Ray worker status..."
 su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && ray status --address=$HEAD_NODE_IP:6379" || echo "Worker may not be connected yet. Check logs for details."
+
+# Create a heartbeat checker script that runs in the virtual environment
+echo "Creating Ray heartbeat checker script..."
+cat > /home/$USERNAME/ray-cluster/check_heartbeat.sh << EOF
+#!/bin/bash
+
+# Source the virtual environment
+source /home/$USERNAME/ray-env/bin/activate
+
+# Set the head node address
+HEAD_NODE_IP=$HEAD_NODE_IP
+
+# Check if Ray is running and connected to the head node
+ray status --address=\$HEAD_NODE_IP:6379 > /dev/null 2>&1
+if [ \$? -ne 0 ]; then
+  echo "[\$(date)] Ray worker disconnected from head node. Restarting..."
+  
+  # Stop any existing Ray processes
+  ray stop
+  sleep 5
+  
+  # Restart Ray worker
+  cd /home/$USERNAME && ./ray-cluster/start_ray_tmux.sh
+  
+  echo "[\$(date)] Ray worker restarted"
+else
+  echo "[\$(date)] Ray worker is connected to head node"
+fi
+EOF
+
+chmod +x /home/$USERNAME/ray-cluster/check_heartbeat.sh
+chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/check_heartbeat.sh
+
+# Create a cron job to run the heartbeat checker every 5 minutes
+echo "Setting up heartbeat checker cron job..."
+HEARTBEAT_CRON="*/5 * * * * /home/$USERNAME/ray-cluster/check_heartbeat.sh >> /home/$USERNAME/ray-cluster/logs/heartbeat.log 2>&1"
+(crontab -u $USERNAME -l 2>/dev/null || echo "") | grep -v "check_heartbeat.sh" | { cat; echo "$HEARTBEAT_CRON"; } | crontab -u $USERNAME -
 
 # Final instructions
 echo "========================================================"
