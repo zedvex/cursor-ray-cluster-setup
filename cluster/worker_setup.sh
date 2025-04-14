@@ -81,6 +81,27 @@ echo "* soft nofile 65536" | tee -a /etc/security/limits.conf
 echo "* hard nofile 65536" | tee -a /etc/security/limits.conf
 sysctl -p || true
 
+# Fix /tmp directory permissions and remove any existing Ray directory
+echo "Fixing /tmp directory permissions..."
+# Check if /tmp/ray exists and who owns it
+if [ -d "/tmp/ray" ]; then
+  echo "Found existing /tmp/ray directory"
+  TMP_OWNER=$(stat -c '%U' /tmp/ray)
+  echo "Current owner: $TMP_OWNER"
+  
+  # Try to cleanly remove the directory
+  if [ "$TMP_OWNER" != "$ACTUAL_USER" ]; then
+    echo "Removing /tmp/ray with sudo..."
+    rm -rf /tmp/ray
+  fi
+fi
+
+# Create a fresh /tmp/ray with proper permissions
+echo "Creating fresh /tmp/ray directory with proper permissions..."
+mkdir -p /tmp/ray
+chmod 1777 /tmp/ray
+chown $ACTUAL_USER:$ACTUAL_USER /tmp/ray
+
 # Create ray worker start script
 echo "Creating Ray worker start script..."
 CLUSTER_DIR="$USER_HOME/ray-cluster"
@@ -95,10 +116,11 @@ cat > "$CLUSTER_DIR/start_worker.sh" << EOF
 # Use full path to ray executable instead of relying on environment activation
 RAY_EXECUTABLE="$RAY_EXECUTABLE"
 
-# Clean up Ray directory
-rm -rf /tmp/ray
-mkdir -p /tmp/ray
-chmod 777 /tmp/ray
+# Don't try to remove /tmp/ray, just ensure it exists with proper permissions
+if [ ! -d "/tmp/ray" ]; then
+  mkdir -p /tmp/ray
+  chmod 777 /tmp/ray
+fi
 
 # Start Ray worker with full path to executable
 "\$RAY_EXECUTABLE" start --address='$HEAD_NODE_IP:6379' \\
@@ -126,7 +148,9 @@ User=$ACTUAL_USER
 WorkingDirectory=$CLUSTER_DIR
 Environment="PATH=$VENV_PATH/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="PYTHONPATH=$VENV_PATH/lib/python3.8/site-packages"
-ExecStartPre=/bin/bash -c 'rm -rf /tmp/ray && mkdir -p /tmp/ray && chmod 777 /tmp/ray'
+# Don't try to remove /tmp/ray in ExecStartPre, just ensure directory exists
+ExecStartPre=/bin/mkdir -p /tmp/ray
+ExecStartPre=/bin/chmod 777 /tmp/ray
 ExecStart=$CLUSTER_DIR/start_worker.sh
 Restart=on-failure
 RestartSec=30
@@ -137,6 +161,10 @@ TimeoutStopSec=20
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# One-time fix for potential /tmp permissions issues
+echo "Ensuring /tmp has sticky bit set..."
+chmod 1777 /tmp
 
 # Enable and start the Ray worker service
 echo "Enabling and starting ray-worker service..."

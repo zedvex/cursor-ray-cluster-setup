@@ -102,6 +102,36 @@ ray-tests --directory ./your_project/tests
 
 ## Troubleshooting
 
+### "/tmp/ray: Operation not permitted" Error
+
+If you see this error in your logs:
+```
+rm: cannot remove '/tmp/ray': Operation not permitted
+```
+
+This is a permissions issue with the /tmp/ray directory. Here's how to fix it:
+
+1. Stop the Ray service:
+   ```bash
+   sudo systemctl stop ray-worker # or ray-head on head node
+   ```
+
+2. Fix the permissions manually:
+   ```bash
+   # Remove the problematic directory and create a new one with proper permissions
+   sudo rm -rf /tmp/ray
+   sudo mkdir -p /tmp/ray
+   sudo chmod 1777 /tmp/ray
+   sudo chown your-username:your-username /tmp/ray
+   ```
+
+3. Start the service again:
+   ```bash
+   sudo systemctl start ray-worker # or ray-head on head node
+   ```
+
+The updated setup scripts should prevent this issue, but if you're using an older version or have custom modifications, you might still encounter it.
+
 ### "Ray: Command Not Found" Error
 
 If you see an error like:
