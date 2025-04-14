@@ -194,7 +194,6 @@ echo "[$(date)] Starting Ray worker with connection to $HEAD_NODE_IP:6379"
 exec ray start --address='$HEAD_NODE_IP:6379' \
   --metrics-export-port=8081 \
   --num-cpus=4 \
-  --system-config='{"health_check_failure_threshold": 30, "health_check_period_ms": 10000, "health_check_initial_delay_ms": 60000}' \
   --block
 EOF
 
