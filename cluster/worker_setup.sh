@@ -132,6 +132,53 @@ EOF
 echo "Applying network settings..."
 sysctl --system || echo "Warning: Could not apply all sysctl settings. This is not critical."
 
+# Create a bare-bones worker script
+echo "Creating minimal Ray worker script..."
+cat > /home/$USERNAME/ray-cluster/minimal_worker.sh << EOF
+#!/bin/bash
+
+# Activate the virtual environment
+source /home/$USERNAME/ray-env/bin/activate
+
+# Stop any existing Ray processes
+ray stop 2>/dev/null || true
+sleep 3
+
+# Clear /tmp/ray
+rm -rf /tmp/ray
+mkdir -p /tmp/ray
+chmod 777 /tmp/ray
+
+# Set head node
+HEAD_NODE="$HEAD_NODE_IP:6379"
+echo "Connecting to Ray head node at \$HEAD_NODE"
+
+# Start Ray with absolute minimal settings
+ray start --address="\$HEAD_NODE" --resources='{"worker_node": 1}' --block
+EOF
+
+chmod +x /home/$USERNAME/ray-cluster/minimal_worker.sh
+chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/minimal_worker.sh
+
+# Create simplest tmux launch script
+cat > /home/$USERNAME/ray-cluster/run_minimal.sh << EOF
+#!/bin/bash
+# Kill any existing sessions
+tmux kill-session -t ray-minimal 2>/dev/null || true
+
+# Start a new session
+tmux new-session -d -s ray-minimal
+
+# Run the minimal worker script
+tmux send-keys -t ray-minimal "cd /home/$USERNAME && ./ray-cluster/minimal_worker.sh" C-m
+
+echo "Started minimal Ray worker in tmux session 'ray-minimal'"
+echo "View with: tmux attach -t ray-minimal"
+EOF
+
+chmod +x /home/$USERNAME/ray-cluster/run_minimal.sh
+chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/run_minimal.sh
+
 # Create a simplified direct run script for Ray worker
 echo "Creating direct Ray worker run script..."
 cat > /home/$USERNAME/ray-cluster/direct_worker.sh << EOF
@@ -331,6 +378,10 @@ echo "TROUBLESHOOTING:"
 echo "- Check logs:    ls -la ~/ray-cluster/logs/"
 echo "- View errors:   cat ~/ray-cluster/logs/raylet-error-*.log"
 echo "- View full log: cat ~/ray-cluster/logs/raylet-worker-*.log"
+echo ""
+echo "MINIMAL APPROACH - TRY THIS AS LAST RESORT:"
+echo "If all else fails, you can try the minimal worker:"
+echo "  ~/ray-cluster/run_minimal.sh"
 echo ""
 echo "The worker will automatically start on reboot via cron."
 echo "========================================================"
