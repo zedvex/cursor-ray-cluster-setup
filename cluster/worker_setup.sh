@@ -190,7 +190,6 @@ echo "[$(date)] Starting Ray worker with connection to $HEAD_NODE_IP:6379"
 ray start --address='$HEAD_NODE_IP:6379' \
   --num-cpus=4 \
   --dashboard-agent-listen-port=0 \
-  --system-config='{"raylet_graceful_shutdown_ms": 60000, "raylet_heartbeat_timeout_milliseconds": 120000}' \
   --block &
 
 # Store the Ray process PID
