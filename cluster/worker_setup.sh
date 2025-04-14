@@ -124,36 +124,75 @@ echo "Creating direct Ray worker run script..."
 cat > /home/$USERNAME/ray-cluster/direct_worker.sh << EOF
 #!/bin/bash
 
+# Set up error handling
+set -e
+trap 'echo "Error on line \$LINENO. Exit code: \$?" >> ~/ray-cluster/logs/error.log' ERR
+
+# Create log directory
+mkdir -p ~/ray-cluster/logs
+LOG_FILE=~/ray-cluster/logs/raylet-worker-\$(date +%Y%m%d-%H%M%S).log
+ERROR_FILE=~/ray-cluster/logs/raylet-error-\$(date +%Y%m%d-%H%M%S).log
+
+echo "================ Starting Ray Worker =================" | tee -a \$LOG_FILE
+echo "Start time: \$(date)" | tee -a \$LOG_FILE
+echo "Head node: $HEAD_NODE_IP:6379" | tee -a \$LOG_FILE
+
 # Stop any existing Ray processes
 source /home/$USERNAME/ray-env/bin/activate
-ray stop 2>/dev/null || true
+echo "Stopping any existing Ray processes..." | tee -a \$LOG_FILE
+ray stop 2>&1 | tee -a \$LOG_FILE || echo "No Ray processes to stop" | tee -a \$LOG_FILE
 sleep 2
 
 # Clean up Ray directory
+echo "Cleaning Ray directory..." | tee -a \$LOG_FILE
 rm -rf /tmp/ray
 mkdir -p /tmp/ray
 chmod 777 /tmp/ray
 
-# Create log directory
-mkdir -p ~/ray-cluster/logs
+# Get system information
+echo "System information:" | tee -a \$LOG_FILE
+free -h | tee -a \$LOG_FILE
+df -h | tee -a \$LOG_FILE
 
 # Set environment variables for debugging
+echo "Setting environment variables..." | tee -a \$LOG_FILE
 export RAY_RAYLET_VERBOSITY=4
 export RAY_verbose_spill_logs=0
 export RAY_record_ref_creation_sites=0
+export RAY_BACKEND_LOG_LEVEL=debug
+export RAY_DISABLE_SUSPICIOUS_NODE_CHECK=1
+export RAY_RAYLET_STARTUP_RETRY=5
+export RAY_RAYLET_HEARTBEAT_TIMEOUT_MILLISECONDS=30000
+export RAY_TIMEOUT_MS=30000
+
+# Calculate memory allocation
+echo "Calculating memory allocation..." | tee -a \$LOG_FILE
+TOTAL_MEMORY=\$(free -b | grep "Mem:" | awk '{print \$2}')
+OBJECT_STORE_MEMORY=\$((\$TOTAL_MEMORY / 5))  # 20% of system memory
+echo "Total memory: \$((\$TOTAL_MEMORY / 1024 / 1024)) MB" | tee -a \$LOG_FILE
+echo "Object store memory: \$((\$OBJECT_STORE_MEMORY / 1024 / 1024)) MB" | tee -a \$LOG_FILE
 
 # Start Ray worker with direct connection to head node and capture logs
-echo "Starting Ray worker with connection to $HEAD_NODE_IP:6379"
-TOTAL_MEMORY=$(free -b | grep "Mem:" | awk '{print $2}')
-OBJECT_STORE_MEMORY=$((TOTAL_MEMORY / 4))  # 25% of system memory
+echo "Starting Ray worker with connection to $HEAD_NODE_IP:6379..." | tee -a \$LOG_FILE
+echo "Command: ray start --address=$HEAD_NODE_IP:6379 --num-cpus=2 --object-store-memory=\$OBJECT_STORE_MEMORY --plasma-directory=/tmp --log-to-driver --logging-level=debug --block" | tee -a \$LOG_FILE
 
+# Run Ray and capture both stdout and stderr
 ray start --address=$HEAD_NODE_IP:6379 \
   --num-cpus=2 \
-  --object-store-memory=$OBJECT_STORE_MEMORY \
+  --object-store-memory=\$OBJECT_STORE_MEMORY \
   --plasma-directory=/tmp \
   --log-to-driver \
   --logging-level=debug \
-  --block 2>&1 | tee ~/ray-cluster/logs/raylet-worker-$(date +%Y%m%d-%H%M%S).log
+  --block >> \$LOG_FILE 2>> \$ERROR_FILE
+
+# This should not be reached unless Ray exits
+echo "Ray worker exited with code \$?" | tee -a \$LOG_FILE
+echo "See error log at \$ERROR_FILE" | tee -a \$LOG_FILE
+echo "================ Ray Worker Stopped =================" | tee -a \$LOG_FILE
+
+# Keep the script running for a minute to allow investigation of logs
+echo "Waiting 60 seconds before terminating script..." | tee -a \$LOG_FILE
+sleep 60
 EOF
 
 chmod +x /home/$USERNAME/ray-cluster/direct_worker.sh
@@ -204,7 +243,12 @@ CRON_JOB="@reboot /home/$USERNAME/ray-cluster/start_ray_tmux.sh > /home/$USERNAM
 # Run the Ray worker in tmux directly
 echo "Starting Ray worker in tmux session..."
 su - $USERNAME -c "/home/$USERNAME/ray-cluster/start_ray_tmux.sh"
-sleep 5
+echo "Waiting for Ray worker to start (30 seconds)..."
+sleep 30
+
+# Check if worker is running
+echo "Checking Ray worker status..."
+su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && ray status --address=$HEAD_NODE_IP:6379" || echo "Worker may not be connected yet. Check logs for details."
 
 # Final instructions
 echo "========================================================"
@@ -219,6 +263,11 @@ echo "MANAGEMENT COMMANDS:"
 echo "- Start worker:  ~/ray-cluster/start_ray_tmux.sh"
 echo "- Check status:  ~/ray-cluster/check_ray.sh"
 echo "- Stop worker:   source ~/ray-env/bin/activate && ray stop"
+echo ""
+echo "TROUBLESHOOTING:"
+echo "- Check logs:    ls -la ~/ray-cluster/logs/"
+echo "- View errors:   cat ~/ray-cluster/logs/raylet-error-*.log"
+echo "- View full log: cat ~/ray-cluster/logs/raylet-worker-*.log"
 echo ""
 echo "The worker will automatically start on reboot via cron."
 echo "========================================================"
