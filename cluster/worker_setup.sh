@@ -98,18 +98,37 @@ else
 fi
 
 # Optimize network settings for Ray
-echo "Optimizing basic network settings..."
+echo "Optimizing network settings for Ray..."
 cat > /etc/sysctl.d/99-ray-network.conf << EOF
-# Increase the maximum socket buffer size (conservative values)
-net.core.rmem_max=4194304
-net.core.wmem_max=4194304
+# Increase the maximum socket buffer size
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
 
 # Increase the default socket buffer size
 net.core.rmem_default=262144
 net.core.wmem_default=262144
+
+# Increase the maximum number of connections
+net.core.somaxconn=65535
+
+# Increase the maximum number of packets queued
+net.core.netdev_max_backlog=2000
+
+# Increase TCP keepalive for better connection stability
+net.ipv4.tcp_keepalive_time=60
+net.ipv4.tcp_keepalive_intvl=10
+net.ipv4.tcp_keepalive_probes=6
+
+# TCP congestion control
+net.ipv4.tcp_congestion_control=cubic
+net.ipv4.tcp_slow_start_after_idle=0
+
+# Avoid dropping connections
+net.ipv4.tcp_retries2=15
 EOF
 
 # Apply the network settings
+echo "Applying network settings..."
 sysctl --system || echo "Warning: Could not apply all sysctl settings. This is not critical."
 
 # Set up Python virtual environment
@@ -134,22 +153,81 @@ ufw --force enable
 echo "Creating Ray worker start script..."
 cat > /home/$USERNAME/ray-cluster/start_worker.sh << EOF
 #!/bin/bash
+set -e
+
+# Setup logging
+LOG_DIR="/home/$USERNAME/ray-cluster/logs"
+mkdir -p \$LOG_DIR
+LOG_FILE="\$LOG_DIR/ray_worker_\$(date +%Y%m%d_%H%M%S).log"
+exec > >(tee -a "\$LOG_FILE") 2>&1
+
+echo "[$(date)] === Starting Ray worker node ==="
 source /home/$USERNAME/ray-env/bin/activate
 
 # Make sure any previous Ray instances are stopped
-ray stop
+echo "[$(date)] Stopping any existing Ray processes..."
+ray stop || true
 
 # Clean any stale Ray directories
+echo "[$(date)] Cleaning stale Ray directories..."
 rm -rf /tmp/ray
 
-# Start Ray worker with critical parameters to ensure stable connection
-ray start --address='$HEAD_NODE_IP:6379' \\
-    --num-cpus=4 \\
-    --dashboard-agent-listen-port=0 \\
-    --resources='{"worker_node": 1.0}' \\
-    --block
+# Set longer timeout for connection
+export RAY_TIMEOUT_MS=60000
 
-echo "Ray worker node started and connected to $HEAD_NODE_IP:6379"
+echo "[$(date)] Starting Ray worker with connection to $HEAD_NODE_IP:6379"
+echo "[$(date)] Using 4 CPUs and dashboard agent on random port"
+
+# Retry loop for better stability
+MAX_RETRIES=5
+RETRY_COUNT=0
+RETRY_DELAY=30
+
+while [ \$RETRY_COUNT -lt \$MAX_RETRIES ]; do
+    echo "[$(date)] Connection attempt \$((RETRY_COUNT+1))/\$MAX_RETRIES"
+    
+    # Start Ray worker with critical parameters to ensure stable connection
+    if ray start --address='$HEAD_NODE_IP:6379' \\
+        --num-cpus=4 \\
+        --dashboard-agent-listen-port=0 \\
+        --resources='{"worker_node": 1.0}' \\
+        --logging-level=debug \\
+        --log-to-driver \\
+        --log-color false \\
+        --block; then
+        
+        echo "[$(date)] Ray worker node successfully connected to $HEAD_NODE_IP:6379"
+        exit 0
+    else
+        RESULT=\$?
+        echo "[$(date)] Ray worker failed to start or maintain connection (exit code \$RESULT)"
+        
+        # Check if we can reach the head node
+        if ping -c 3 $HEAD_NODE_IP &> /dev/null; then
+            echo "[$(date)] Network connectivity to head node confirmed."
+        else
+            echo "[$(date)] WARNING: Cannot ping head node at $HEAD_NODE_IP"
+        fi
+        
+        # Check Ray port connectivity
+        if nc -z -w 5 $HEAD_NODE_IP 6379; then
+            echo "[$(date)] Ray port connectivity confirmed."
+        else
+            echo "[$(date)] WARNING: Cannot connect to Ray port on head node at $HEAD_NODE_IP:6379"
+        fi
+        
+        RETRY_COUNT=\$((RETRY_COUNT+1))
+        if [ \$RETRY_COUNT -lt \$MAX_RETRIES ]; then
+            echo "[$(date)] Waiting \$RETRY_DELAY seconds before retrying..."
+            sleep \$RETRY_DELAY
+        else
+            echo "[$(date)] Maximum retry attempts reached. Please check the Ray head node."
+            exit 1
+        fi
+    fi
+done
+
+echo "[$(date)] Ray worker node started and connected to $HEAD_NODE_IP:6379"
 EOF
 
 chmod +x /home/$USERNAME/ray-cluster/start_worker.sh
@@ -251,9 +329,10 @@ echo "Creating systemd service for Ray worker..."
 cat > /etc/systemd/system/ray-worker.service << EOF
 [Unit]
 Description=Ray Worker Node
-After=network.target
-StartLimitIntervalSec=500
-StartLimitBurst=5
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=1200
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -264,13 +343,90 @@ ExecStart=/bin/bash /home/$USERNAME/ray-cluster/start_worker.sh
 ExecStop=/home/$USERNAME/ray-env/bin/ray stop
 KillMode=mixed
 KillSignal=SIGTERM
-TimeoutStopSec=20
-Restart=on-failure
-RestartSec=30
+TimeoutStartSec=180
+TimeoutStopSec=60
+Restart=always
+RestartSec=60
+SuccessExitStatus=0 143
+# Add environment variables that might help with connectivity
+Environment="RAY_DISABLE_SUSPICIOUS_NODE_CHECK=1"
+Environment="RAY_TIMEOUT_MS=60000"
 
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# Create a new log monitoring script
+echo "Creating log monitoring script..."
+cat > /home/$USERNAME/ray-cluster/monitor_ray_logs.sh << 'EOF'
+#!/bin/bash
+
+LOG_DIR="/home/$USERNAME/ray-cluster/logs"
+LAST_CHECK_FILE="/home/$USERNAME/ray-cluster/last_log_check"
+mkdir -p "$LOG_DIR"
+
+# Initialize last check time if it doesn't exist
+if [ ! -f "$LAST_CHECK_FILE" ]; then
+  date +%s > "$LAST_CHECK_FILE"
+fi
+
+# Get errors and warnings from logs since last check
+LAST_CHECK=$(cat "$LAST_CHECK_FILE")
+CURRENT_TIME=$(date +%s)
+
+# Record current time for next check
+echo "$CURRENT_TIME" > "$LAST_CHECK_FILE"
+
+# Find all log files
+LOG_FILES=$(find "$LOG_DIR" -name "ray_worker_*.log")
+
+if [ -z "$LOG_FILES" ]; then
+  echo "No log files found in $LOG_DIR"
+  exit 0
+fi
+
+# Look for important error patterns
+echo "=== Ray Worker Error Report $(date) ==="
+
+for LOG_FILE in $LOG_FILES; do
+  MODIFIED_TIME=$(stat -c %Y "$LOG_FILE")
+  if [ "$MODIFIED_TIME" -gt "$LAST_CHECK" ]; then
+    echo "--- Analyzing log file: $LOG_FILE ---"
+    
+    # Check for critical error patterns
+    grep -i -E "error|exception|fail|cannot|timeout|refused" "$LOG_FILE" | tail -n 50
+    
+    # Look for important Ray-specific messages
+    grep -i -E "ray.*dead|connection.*lost|node.*dead|raylet" "$LOG_FILE" | tail -n 50
+  fi
+done
+
+echo "=== End of Report ==="
+EOF
+
+chmod +x /home/$USERNAME/ray-cluster/monitor_ray_logs.sh
+chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/monitor_ray_logs.sh
+
+# Create a cron job to run the monitoring script
+echo "Setting up log monitoring cron job..."
+CRON_JOB="*/10 * * * * /home/$USERNAME/ray-cluster/monitor_ray_logs.sh > /home/$USERNAME/ray-cluster/logs/monitor_$(date +\%Y\%m\%d).log 2>&1"
+(crontab -u $USERNAME -l 2>/dev/null || echo "") | grep -v "monitor_ray_logs.sh" | { cat; echo "$CRON_JOB"; } | crontab -u $USERNAME -
+
+# Set up authorized keys for passwordless SSH if requested
+echo "========================================================"
+echo "To enable passwordless SSH from head node, paste the head node's"
+echo "public key when prompted (or press Enter to skip this step):"
+echo "========================================================"
+read -p "Head node's public key (or press Enter to skip): " PUBLIC_KEY
+
+if [ ! -z "$PUBLIC_KEY" ]; then
+  mkdir -p /home/$USERNAME/.ssh
+  echo "$PUBLIC_KEY" >> /home/$USERNAME/.ssh/authorized_keys
+  chmod 700 /home/$USERNAME/.ssh
+  chmod 600 /home/$USERNAME/.ssh/authorized_keys
+  chown -R $USERNAME:$USERNAME /home/$USERNAME/.ssh
+  echo "Public key added to authorized_keys."
+fi
 
 # Create a systemd service for node-exporter
 echo "Creating systemd service for node-exporter..."
@@ -291,22 +447,6 @@ ExecStop=/bin/bash /home/$USERNAME/ray-cluster/stop_node_exporter.sh
 [Install]
 WantedBy=multi-user.target
 EOF
-
-# Set up authorized keys for passwordless SSH if requested
-echo "========================================================"
-echo "To enable passwordless SSH from head node, paste the head node's"
-echo "public key when prompted (or press Enter to skip this step):"
-echo "========================================================"
-read -p "Head node's public key (or press Enter to skip): " PUBLIC_KEY
-
-if [ ! -z "$PUBLIC_KEY" ]; then
-  mkdir -p /home/$USERNAME/.ssh
-  echo "$PUBLIC_KEY" >> /home/$USERNAME/.ssh/authorized_keys
-  chmod 700 /home/$USERNAME/.ssh
-  chmod 600 /home/$USERNAME/.ssh/authorized_keys
-  chown -R $USERNAME:$USERNAME /home/$USERNAME/.ssh
-  echo "Public key added to authorized_keys."
-fi
 
 # Enable and start the services
 systemctl daemon-reload
