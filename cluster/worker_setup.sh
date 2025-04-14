@@ -114,10 +114,10 @@ net.core.somaxconn=65535
 # Increase the maximum number of packets queued
 net.core.netdev_max_backlog=2000
 
-# Increase TCP keepalive for better connection stability
-net.ipv4.tcp_keepalive_time=60
-net.ipv4.tcp_keepalive_intvl=10
-net.ipv4.tcp_keepalive_probes=6
+# Increase TCP keepalive for better connection stability (crucial for Ray heartbeats)
+net.ipv4.tcp_keepalive_time=30
+net.ipv4.tcp_keepalive_intvl=5
+net.ipv4.tcp_keepalive_probes=10
 
 # TCP congestion control
 net.ipv4.tcp_congestion_control=cubic
@@ -125,6 +125,13 @@ net.ipv4.tcp_slow_start_after_idle=0
 
 # Avoid dropping connections
 net.ipv4.tcp_retries2=15
+
+# Increase maximum active socket connections
+net.ipv4.tcp_max_tw_buckets=1440000
+net.ipv4.tcp_fin_timeout=15
+
+# Increase TCP window scaling window
+net.ipv4.tcp_window_scaling=1
 EOF
 
 # Apply the network settings
@@ -173,9 +180,23 @@ sleep 2
 echo "[$(date)] Checking Ray directories..."
 mkdir -p /tmp/ray 2>/dev/null || true
 
-# Simple Ray start command with minimal options
+# Set critical environment variables for network reliability
+echo "[$(date)] Setting environment variables for network stability..."
+export RAY_RAYLET_HEARTBEAT_TIMEOUT_MILLISECONDS=120000
+export RAY_RAYLET_STARTUP_RETRY=10
+export RAY_TIMEOUT_MS=120000
+export RAY_METRICS_EXPORT_PORT=8080
+export RAY_NUM_HEARTBEATS_TIMEOUT=75
+export RAY_HEARTBEAT_TIMEOUT_MILLISECONDS=10000
+
+# Simple Ray start command with matching parameters to head node
 echo "[$(date)] Starting Ray worker with connection to $HEAD_NODE_IP:6379"
-exec ray start --address='$HEAD_NODE_IP:6379' --num-cpus=4 --block
+exec ray start --address='$HEAD_NODE_IP:6379' \
+  --port=0 \
+  --metrics-export-port=8081 \
+  --num-cpus=4 \
+  --system-config='{"health_check_failure_threshold": 30, "health_check_period_ms": 10000, "health_check_initial_delay_ms": 60000}' \
+  --block
 EOF
 
 chmod +x /home/$USERNAME/ray-cluster/start_worker.sh
