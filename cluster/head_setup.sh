@@ -29,6 +29,9 @@ echo "Installing Ray and dependencies..."
 pip install --upgrade pip
 pip install "ray[default]==2.10.0" pandas numpy psutil
 
+# Ensure venv directory is accessible
+chmod -R 755 /home/$USERNAME/ray-env
+
 # Increase system limits
 echo "Configuring system limits..."
 echo "fs.file-max = 65536" | sudo tee -a /etc/sysctl.conf
@@ -40,19 +43,22 @@ sudo sysctl -p
 echo "Creating Ray head node start script..."
 mkdir -p /home/$USERNAME/ray-cluster
 
+RAY_PATH="/home/$USERNAME/ray-env/bin/ray"
+
 cat > /home/$USERNAME/ray-cluster/start_head.sh << EOF
 #!/bin/bash
 # Ray head start script
 
-source /home/$USERNAME/ray-env/bin/activate
+# Use full path to ray executable instead of relying on environment activation
+RAY_EXECUTABLE="/home/$USERNAME/ray-env/bin/ray"
 
 # Clean up Ray directory
 rm -rf /tmp/ray
 mkdir -p /tmp/ray
 chmod 777 /tmp/ray
 
-# Start Ray head node
-ray start --head \\
+# Start Ray head node with full path to executable
+\$RAY_EXECUTABLE start --head \\
     --port=6379 \\
     --dashboard-host=0.0.0.0 \\
     --num-cpus=4 \\
@@ -75,6 +81,8 @@ StartLimitBurst=5
 Type=simple
 User=$USERNAME
 WorkingDirectory=/home/$USERNAME/ray-cluster
+Environment="PATH=/home/$USERNAME/ray-env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PYTHONPATH=/home/$USERNAME/ray-env/lib/python3.8/site-packages"
 ExecStartPre=/bin/rm -rf /tmp/ray
 ExecStart=/home/$USERNAME/ray-cluster/start_head.sh
 Restart=on-failure
@@ -105,7 +113,11 @@ sudo systemctl start ray-head.service
 
 echo "Waiting for service to start..."
 sleep 5
-sudo systemctl status ray-head.service
+sudo systemctl status ray-head.service || true
+
+# Double check that Ray is working properly
+echo "Verifying Ray installation..."
+$RAY_PATH --version
 
 echo "========== Ray head node setup complete =========="
 echo "To check status: sudo systemctl status ray-head"
