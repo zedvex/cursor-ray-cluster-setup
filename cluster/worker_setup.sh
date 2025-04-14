@@ -154,73 +154,28 @@ echo "Creating Ray worker start script..."
 cat > /home/$USERNAME/ray-cluster/start_worker.sh << EOF
 #!/bin/bash
 
-# Create log directory
+# Simple logging to file
 LOG_DIR="/home/$USERNAME/ray-cluster/logs"
 mkdir -p \$LOG_DIR
 LOG_FILE="\$LOG_DIR/ray_worker_\$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "\$LOG_FILE") 2>&1
 
+# Basic setup
 echo "[$(date)] Starting Ray worker process..."
 source /home/$USERNAME/ray-env/bin/activate
-
-# Make sure we can reach the head node
-echo "[$(date)] Checking connectivity to head node at $HEAD_NODE_IP..."
-if ! ping -c 3 $HEAD_NODE_IP &> /dev/null; then
-  echo "[$(date)] ERROR: Cannot ping head node at $HEAD_NODE_IP"
-  exit 1
-fi
-
-# Check Ray port connectivity
-echo "[$(date)] Checking Ray port on head node..."
-if ! nc -z -w 5 $HEAD_NODE_IP 6379; then
-  echo "[$(date)] ERROR: Cannot connect to Ray port on head node at $HEAD_NODE_IP:6379"
-  exit 1
-fi
 
 # Stop any existing Ray processes
 echo "[$(date)] Stopping any existing Ray processes..."
 ray stop 2>/dev/null || true
-sleep 5
+sleep 2
 
-# Clean up any stale Ray directories
-echo "[$(date)] Handling Ray temporary directories..."
-if [ -d "/tmp/ray" ]; then
-  echo "[$(date)] Found existing Ray directory, checking permissions..."
-  if ! [ -w "/tmp/ray" ]; then
-    echo "[$(date)] WARNING: Cannot write to /tmp/ray, trying with sudo..."
-    sudo rm -rf /tmp/ray || true
-    sudo mkdir -p /tmp/ray
-    sudo chmod -R 777 /tmp/ray
-    sudo chown -R $(whoami):$(whoami) /tmp/ray
-  else
-    echo "[$(date)] Cleaning existing Ray directory..."
-    rm -rf /tmp/ray/* 2>/dev/null || true
-  fi
-else
-  echo "[$(date)] Creating new Ray directory..."
-  mkdir -p /tmp/ray
-fi
-echo "[$(date)] Setting Ray directory permissions..."
-chmod -R 777 /tmp/ray 2>/dev/null || sudo chmod -R 777 /tmp/ray
+# Make sure /tmp/ray exists and has proper permissions
+echo "[$(date)] Checking Ray directories..."
+mkdir -p /tmp/ray 2>/dev/null || true
 
-# Set Ray environment variables
-echo "[$(date)] Setting Ray environment variables..."
-export RAY_DISABLE_CONNECTION_ISSUE_DETECTION=1
-export RAY_BACKEND_LOG_LEVEL=debug
-export RAY_TIMEOUT_MS=120000
-export RAY_RAYLET_STARTUP_RETRY=10
-export RAY_RAYLET_RETRY_TIMEOUT_MS=10000
-export RAY_verbose_spill_logs=0
-export RAY_record_ref_creation_sites=0
-
-# Start Ray worker - running directly without background
+# Simple Ray start command with minimal options
 echo "[$(date)] Starting Ray worker with connection to $HEAD_NODE_IP:6379"
-exec ray start --address='$HEAD_NODE_IP:6379' \
-  --num-cpus=4 \
-  --resources='{"worker": 1.0}' \
-  --log-style=record \
-  --log-to-driver \
-  --block
+exec ray start --address='$HEAD_NODE_IP:6379' --num-cpus=4 --block
 EOF
 
 chmod +x /home/$USERNAME/ray-cluster/start_worker.sh
@@ -331,9 +286,8 @@ StartLimitBurst=10
 Type=simple
 User=$USERNAME
 WorkingDirectory=/home/$USERNAME
-# Clean up before starting - using script to handle permissions properly
-ExecStartPre=/bin/bash -c "sudo rm -rf /tmp/ray || true; sudo mkdir -p /tmp/ray; sudo chmod 777 /tmp/ray; sudo chown $USERNAME:$USERNAME /tmp/ray"
-ExecStartPre=/home/$USERNAME/ray-env/bin/ray stop || true
+# Create a helper script to handle ray directory setup
+ExecStartPre=/bin/bash -c "source /home/$USERNAME/ray-env/bin/activate && ray stop || true"
 ExecStart=/bin/bash /home/$USERNAME/ray-cluster/start_worker.sh
 ExecStop=/home/$USERNAME/ray-env/bin/ray stop
 KillMode=process
@@ -348,6 +302,25 @@ SuccessExitStatus=0 143 137
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# Create a helper script to prepare Ray directories with root permissions
+echo "Creating Ray directory setup script..."
+cat > /home/$USERNAME/ray-cluster/prepare_ray_dirs.sh << 'EOF'
+#!/bin/bash
+# This script is meant to be run as root (via sudo)
+rm -rf /tmp/ray
+mkdir -p /tmp/ray
+chmod -R 777 /tmp/ray
+# Get the username from the first argument
+USERNAME=$1
+if [ -n "$USERNAME" ]; then
+  chown -R $USERNAME:$USERNAME /tmp/ray
+fi
+echo "Ray directories prepared successfully"
+EOF
+
+chmod +x /home/$USERNAME/ray-cluster/prepare_ray_dirs.sh
+chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/prepare_ray_dirs.sh
 
 # Create a new log monitoring script
 echo "Creating log monitoring script..."
@@ -455,8 +428,7 @@ sudo mkdir -p /tmp/ray
 sudo chmod -R 777 /tmp/ray
 sudo chown -R $USERNAME:$USERNAME /tmp/ray
 # Also set up Ray directories for the user
-su - $USERNAME -c "rm -rf /tmp/ray 2>/dev/null || true"
-su - $USERNAME -c "mkdir -p /tmp/ray"
+sudo /home/$USERNAME/ray-cluster/prepare_ray_dirs.sh $USERNAME
 
 # Enable and start the key services one at a time with proper checking
 echo "Enabling and starting node-exporter service..."
@@ -484,10 +456,10 @@ fi
 echo "Setting up sudo permissions for Ray operations..."
 cat > /etc/sudoers.d/ray-worker << EOF
 # Allow Ray user to manage Ray directories without password
-$USERNAME ALL=(ALL) NOPASSWD: /bin/rm -rf /tmp/ray*
-$USERNAME ALL=(ALL) NOPASSWD: /bin/mkdir -p /tmp/ray*
-$USERNAME ALL=(ALL) NOPASSWD: /bin/chmod -R 777 /tmp/ray*
-$USERNAME ALL=(ALL) NOPASSWD: /bin/chown -R $USERNAME:$USERNAME /tmp/ray*
+$USERNAME ALL=(ALL) NOPASSWD: /bin/rm -rf /tmp/ray, /bin/rm -rf /tmp/ray/*
+$USERNAME ALL=(ALL) NOPASSWD: /bin/mkdir -p /tmp/ray
+$USERNAME ALL=(ALL) NOPASSWD: /bin/chmod -R 777 /tmp/ray
+$USERNAME ALL=(ALL) NOPASSWD: /bin/chown -R * /tmp/ray
 EOF
 chmod 440 /etc/sudoers.d/ray-worker
 
