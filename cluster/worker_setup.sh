@@ -174,15 +174,15 @@ echo "Object store memory: \$((\$OBJECT_STORE_MEMORY / 1024 / 1024)) MB" | tee -
 
 # Start Ray worker with direct connection to head node and capture logs
 echo "Starting Ray worker with connection to $HEAD_NODE_IP:6379..." | tee -a \$LOG_FILE
-echo "Command: ray start --address=$HEAD_NODE_IP:6379 --num-cpus=2 --object-store-memory=\$OBJECT_STORE_MEMORY --plasma-directory=/tmp --log-to-driver --logging-level=debug --block" | tee -a \$LOG_FILE
+echo "Command: ray start --address=$HEAD_NODE_IP:6379 --num-cpus=2 --object-store-memory=\$OBJECT_STORE_MEMORY --plasma-directory=/tmp --logging-level=debug --log-style=record --block" | tee -a \$LOG_FILE
 
 # Run Ray and capture both stdout and stderr
 ray start --address=$HEAD_NODE_IP:6379 \
   --num-cpus=2 \
   --object-store-memory=\$OBJECT_STORE_MEMORY \
   --plasma-directory=/tmp \
-  --log-to-driver \
   --logging-level=debug \
+  --log-style=record \
   --block >> \$LOG_FILE 2>> \$ERROR_FILE
 
 # This should not be reached unless Ray exits
