@@ -145,8 +145,18 @@ su - $USERNAME -c "python3 -m venv /home/$USERNAME/ray-env"
 # Install Ray in the virtual environment
 echo "Installing Ray..."
 su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install --upgrade pip"
-# Install the latest Ray version that's compatible with Python 3.12 with exact dependencies that work well together
-su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install ray[default]==2.44.1 pandas==2.1.1 numpy==1.26.1 psutil==5.9.6 prometheus-client==0.17.1"
+# Install a stable version with plasma store disabled
+su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install ray[default]==2.44.1"
+
+# Create a Ray configuration file to disable object store
+echo "Configuring Ray to disable object store..."
+mkdir -p /home/$USERNAME/.ray
+cat > /home/$USERNAME/.ray/ray.yaml << EOF
+# Configuration for Ray with minimal memory usage
+object_store_memory: 100000000  # 100MB only, minimal object store
+plasma_directory: /tmp
+EOF
+chown -R $USERNAME:$USERNAME /home/$USERNAME/.ray
 
 # Configure firewall
 echo "Configuring firewall..."
@@ -161,40 +171,22 @@ echo "Creating Ray worker start script..."
 cat > /home/$USERNAME/ray-cluster/start_worker.sh << EOF
 #!/bin/bash
 
-# Simple logging to file
-LOG_DIR="/home/$USERNAME/ray-cluster/logs"
-mkdir -p \$LOG_DIR
-LOG_FILE="\$LOG_DIR/ray_worker_\$(date +%Y%m%d_%H%M%S).log"
-exec > >(tee -a "\$LOG_FILE") 2>&1
-
 # Basic setup
-echo "[$(date)] Starting Ray worker process..."
+echo "Starting Ray worker process..."
 source /home/$USERNAME/ray-env/bin/activate
 
+# Clean temporary directory
+rm -rf /tmp/ray
+mkdir -p /tmp/ray
+chmod 777 /tmp/ray
+
 # Stop any existing Ray processes
-echo "[$(date)] Stopping any existing Ray processes..."
 ray stop 2>/dev/null || true
 sleep 2
 
-# Make sure /tmp/ray exists and has proper permissions
-echo "[$(date)] Checking Ray directories..."
-mkdir -p /tmp/ray 2>/dev/null || true
-
-# Set critical environment variables for network reliability
-echo "[$(date)] Setting environment variables for network stability..."
-export RAY_RAYLET_HEARTBEAT_TIMEOUT_MILLISECONDS=120000
-export RAY_RAYLET_STARTUP_RETRY=10
-export RAY_TIMEOUT_MS=120000
-export RAY_METRICS_EXPORT_PORT=8080
-export RAY_NUM_HEARTBEATS_TIMEOUT=75
-export RAY_HEARTBEAT_TIMEOUT_MILLISECONDS=10000
-
-# Simple Ray start command with matching parameters to head node
-echo "[$(date)] Starting Ray worker with connection to $HEAD_NODE_IP:6379"
-exec ray start --address='$HEAD_NODE_IP:6379' \
-  --metrics-export-port=8081 \
-  --num-cpus=4 \
-  --block
+# Use the absolute minimum basic command that's known to work
+echo "Starting Ray worker with connection to $HEAD_NODE_IP:6379"
+ray start --address=$HEAD_NODE_IP:6379 --num-cpus=4 --block
 EOF
 
 chmod +x /home/$USERNAME/ray-cluster/start_worker.sh
@@ -295,28 +287,17 @@ echo "Creating systemd service for Ray worker..."
 cat > /etc/systemd/system/ray-worker.service << EOF
 [Unit]
 Description=Ray Worker Node
-After=network-online.target docker.service
+After=network-online.target
 Wants=network-online.target
-Conflicts=shutdown.target reboot.target halt.target
-StartLimitIntervalSec=5400
-StartLimitBurst=10
 
 [Service]
 Type=simple
 User=$USERNAME
 WorkingDirectory=/home/$USERNAME
-# Create a helper script to handle ray directory setup
-ExecStartPre=/bin/bash -c "source /home/$USERNAME/ray-env/bin/activate && ray stop || true"
 ExecStart=/bin/bash /home/$USERNAME/ray-cluster/start_worker.sh
 ExecStop=/home/$USERNAME/ray-env/bin/ray stop
-KillMode=process
-KillSignal=SIGTERM
-SendSIGKILL=yes
-TimeoutStartSec=180
-TimeoutStopSec=90
-Restart=always
-RestartSec=90
-SuccessExitStatus=0 143 137
+Restart=on-failure
+RestartSec=30
 
 [Install]
 WantedBy=multi-user.target
