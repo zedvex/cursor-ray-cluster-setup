@@ -138,8 +138,8 @@ su - $USERNAME -c "python3 -m venv /home/$USERNAME/ray-env"
 # Install Ray in the virtual environment
 echo "Installing Ray..."
 su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install --upgrade pip"
-# Install recent stable version of Ray
-su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install 'ray[default]>=2.36.0' pandas numpy psutil prometheus-client"
+# Install the latest Ray version that's compatible with Python 3.12
+su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install 'ray[default]==2.44.0' pandas numpy psutil prometheus-client"
 
 # Configure firewall
 echo "Configuring firewall..."
@@ -153,92 +153,35 @@ ufw --force enable
 echo "Creating Ray worker start script..."
 cat > /home/$USERNAME/ray-cluster/start_worker.sh << EOF
 #!/bin/bash
-set -e
 
-# Setup logging
+# Create log directory
 LOG_DIR="/home/$USERNAME/ray-cluster/logs"
 mkdir -p \$LOG_DIR
-LOG_FILE="\$LOG_DIR/ray_worker_\$(date +%Y%m%d_%H%M%S).log"
-exec > >(tee -a "\$LOG_FILE") 2>&1
 
-echo "[$(date)] === Starting Ray worker node ==="
+# Activate the virtual environment
 source /home/$USERNAME/ray-env/bin/activate
 
-# Make sure any previous Ray instances are stopped
-echo "[$(date)] Stopping any existing Ray processes..."
-ray stop || true
+# Stop any existing Ray processes
+ray stop 2>/dev/null || true
+sleep 2
 
-# Clean any stale Ray directories
-echo "[$(date)] Cleaning stale Ray directories..."
+# Clean up any stale Ray directories
 rm -rf /tmp/ray
 
-# Set longer timeout for connection
-export RAY_TIMEOUT_MS=60000
-
-echo "[$(date)] Starting Ray worker with connection to $HEAD_NODE_IP:6379"
-echo "[$(date)] Using 4 CPUs and dashboard agent on random port"
-
-# Retry loop for better stability
-MAX_RETRIES=5
-RETRY_COUNT=0
-RETRY_DELAY=30
-
-while [ \$RETRY_COUNT -lt \$MAX_RETRIES ]; do
-    echo "[$(date)] Connection attempt \$((RETRY_COUNT+1))/\$MAX_RETRIES"
-    
-    # Start Ray worker with critical parameters to ensure stable connection
-    if ray start --address='$HEAD_NODE_IP:6379' \\
-        --num-cpus=4 \\
-        --dashboard-agent-listen-port=0 \\
-        --resources='{"worker_node": 1.0}' \\
-        --logging-level=debug \\
-        --log-to-driver \\
-        --log-color false \\
-        --block; then
-        
-        echo "[$(date)] Ray worker node successfully connected to $HEAD_NODE_IP:6379"
-        exit 0
-    else
-        RESULT=\$?
-        echo "[$(date)] Ray worker failed to start or maintain connection (exit code \$RESULT)"
-        
-        # Check if we can reach the head node
-        if ping -c 3 $HEAD_NODE_IP &> /dev/null; then
-            echo "[$(date)] Network connectivity to head node confirmed."
-        else
-            echo "[$(date)] WARNING: Cannot ping head node at $HEAD_NODE_IP"
-        fi
-        
-        # Check Ray port connectivity
-        if nc -z -w 5 $HEAD_NODE_IP 6379; then
-            echo "[$(date)] Ray port connectivity confirmed."
-        else
-            echo "[$(date)] WARNING: Cannot connect to Ray port on head node at $HEAD_NODE_IP:6379"
-        fi
-        
-        RETRY_COUNT=\$((RETRY_COUNT+1))
-        if [ \$RETRY_COUNT -lt \$MAX_RETRIES ]; then
-            echo "[$(date)] Waiting \$RETRY_DELAY seconds before retrying..."
-            sleep \$RETRY_DELAY
-        else
-            echo "[$(date)] Maximum retry attempts reached. Please check the Ray head node."
-            exit 1
-        fi
-    fi
-done
-
-echo "[$(date)] Ray worker node started and connected to $HEAD_NODE_IP:6379"
+# Start Ray worker in the most basic way
+# The --block flag ensures it stays in the foreground
+echo "Starting Ray worker with connection to $HEAD_NODE_IP:6379"
+ray start --address=$HEAD_NODE_IP:6379 --num-cpus=4 --block
 EOF
 
 chmod +x /home/$USERNAME/ray-cluster/start_worker.sh
 chown $USERNAME:$USERNAME /home/$USERNAME/ray-cluster/start_worker.sh
 
-# Create script to stop Ray
+# Create script to stop Ray (simple version)
 cat > /home/$USERNAME/ray-cluster/stop_ray.sh << EOF
 #!/bin/bash
 source /home/$USERNAME/ray-env/bin/activate
 ray stop
-echo "Ray worker node stopped"
 EOF
 
 chmod +x /home/$USERNAME/ray-cluster/stop_ray.sh
@@ -331,26 +274,15 @@ cat > /etc/systemd/system/ray-worker.service << EOF
 Description=Ray Worker Node
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=1200
-StartLimitBurst=10
 
 [Service]
 Type=simple
 User=$USERNAME
 WorkingDirectory=/home/$USERNAME
-ExecStartPre=/bin/bash -c "rm -rf /tmp/ray"
 ExecStart=/bin/bash /home/$USERNAME/ray-cluster/start_worker.sh
 ExecStop=/home/$USERNAME/ray-env/bin/ray stop
-KillMode=mixed
-KillSignal=SIGTERM
-TimeoutStartSec=180
-TimeoutStopSec=60
 Restart=always
-RestartSec=60
-SuccessExitStatus=0 143
-# Add environment variables that might help with connectivity
-Environment="RAY_DISABLE_SUSPICIOUS_NODE_CHECK=1"
-Environment="RAY_TIMEOUT_MS=60000"
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
@@ -450,31 +382,35 @@ EOF
 
 # Enable and start the services
 systemctl daemon-reload
+
+# Stop all Ray-related services to ensure clean start
+systemctl stop ray-worker.service ray-watchdog.service node-exporter.service 2>/dev/null || true
+systemctl disable ray-watchdog.service 2>/dev/null || true
+
+# Remove any stale Ray directories
+rm -rf /tmp/ray
+su - $USERNAME -c "rm -rf /tmp/ray"
+
+# Enable and start the key services
 systemctl enable ray-worker.service
-systemctl start ray-worker.service
+systemctl restart ray-worker.service
 systemctl enable node-exporter.service
-systemctl start node-exporter.service
-
-# Don't enable/start the watchdog for now to troubleshoot the connection issues
-# systemctl enable ray-watchdog.service
-# systemctl start ray-watchdog.service
+systemctl restart node-exporter.service
 
 echo "========================================================"
-echo "Ray worker node setup completed successfully!"
+echo "Ray worker node setup completed!"
 echo "========================================================"
 echo ""
-echo "Status:"
+echo "STATUS INFORMATION:"
 echo "- Ray worker service: $(systemctl is-active ray-worker.service)"
-echo "- Node exporter: $(systemctl is-active node-exporter.service)"
+echo "- Ray worker service logs:"
+journalctl -u ray-worker.service -n 20 --no-pager
 echo ""
-echo "Next steps:"
-echo "1. Verify worker node status: sudo systemctl status ray-worker"
-echo "2. Check if worker appears in Ray dashboard: http://$HEAD_NODE_IP:8265"
-echo "3. Verify node metrics are available: http://$HEAD_NODE_IP:9090/targets"
+echo "NEXT STEPS:"
+echo "- Check if worker appears in Ray dashboard: http://$HEAD_NODE_IP:8265"
 echo ""
-echo "For manual operation:"
-echo "- Start worker: ~/ray-cluster/start_worker.sh"
-echo "- Stop worker:  ~/ray-cluster/stop_ray.sh"
-echo "- Start node-exporter: ~/ray-cluster/start_node_exporter.sh"
-echo "- Stop node-exporter: ~/ray-cluster/stop_node_exporter.sh"
+echo "TROUBLESHOOTING COMMANDS:"
+echo "- Restart worker:       sudo systemctl restart ray-worker"
+echo "- Check worker status:  sudo systemctl status ray-worker"
+echo "- View logs:            sudo journalctl -fu ray-worker"
 echo "========================================================"
