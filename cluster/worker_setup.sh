@@ -45,8 +45,16 @@ fi
 # Install Ray in the virtual environment
 echo "Installing Ray..."
 su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install --upgrade pip"
-# Install a stable version with plasma store disabled
-su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install ray[default]==2.44.1"
+# Install the exact same Ray version as on the head node
+su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && pip install 'ray[default]==2.44.1'"
+
+# Install system dependencies that Ray might need
+echo "Installing system dependencies for Ray..."
+apt-get install -y build-essential libgl1-mesa-glx libjpeg-dev libxrender1 libsm6 libxext6
+
+# Ensure Python in virtual env has access to system site packages (may help with some dependencies)
+su - $USERNAME -c "touch /home/$USERNAME/ray-env/lib/python*/site-packages/setuptools.pth"
+su - $USERNAME -c "echo '/usr/lib/python*/dist-packages' > /home/$USERNAME/ray-env/lib/python*/site-packages/setuptools.pth"
 
 # Create a shared memory directory that can be used by Ray
 echo "Setting up shared memory for Ray..."
@@ -141,7 +149,7 @@ echo "Head node: $HEAD_NODE_IP:6379" | tee -a \$LOG_FILE
 source /home/$USERNAME/ray-env/bin/activate
 echo "Stopping any existing Ray processes..." | tee -a \$LOG_FILE
 ray stop 2>&1 | tee -a \$LOG_FILE || echo "No Ray processes to stop" | tee -a \$LOG_FILE
-sleep 2
+sleep 5
 
 # Clean up Ray directory
 echo "Cleaning Ray directory..." | tee -a \$LOG_FILE
@@ -154,45 +162,39 @@ echo "System information:" | tee -a \$LOG_FILE
 free -h | tee -a \$LOG_FILE
 df -h | tee -a \$LOG_FILE
 
-# Set environment variables for debugging
-echo "Setting environment variables..." | tee -a \$LOG_FILE
-export RAY_RAYLET_VERBOSITY=4
-export RAY_verbose_spill_logs=0
-export RAY_record_ref_creation_sites=0
-export RAY_BACKEND_LOG_LEVEL=debug
-export RAY_DISABLE_SUSPICIOUS_NODE_CHECK=1
-export RAY_RAYLET_STARTUP_RETRY=5
-export RAY_RAYLET_HEARTBEAT_TIMEOUT_MILLISECONDS=30000
-export RAY_TIMEOUT_MS=30000
+# Very important - set stable environment variables for heartbeat and connectivity
+export RAY_HEARTBEAT_TIMEOUT_MILLISECONDS=60000
+export RAY_NUM_HEARTBEATS_TIMEOUT=60
+export RAY_TIMEOUT_MS=60000
+export RAY_REDIS_ADDRESS="$HEAD_NODE_IP:6379"
+export RAY_head_args="--redis-password= --num-cpus=0"
 
 # Calculate memory allocation
 echo "Calculating memory allocation..." | tee -a \$LOG_FILE
 TOTAL_MEMORY=\$(free -b | grep "Mem:" | awk '{print \$2}')
-OBJECT_STORE_MEMORY=\$((\$TOTAL_MEMORY / 5))  # 20% of system memory
+OBJECT_STORE_MEMORY=\$((\$TOTAL_MEMORY / 6))  # ~16% of memory for object store
+MEMORY_TO_USE=\$((\$TOTAL_MEMORY / 6))  # ~16% of memory for Ray
 echo "Total memory: \$((\$TOTAL_MEMORY / 1024 / 1024)) MB" | tee -a \$LOG_FILE
 echo "Object store memory: \$((\$OBJECT_STORE_MEMORY / 1024 / 1024)) MB" | tee -a \$LOG_FILE
+echo "Ray memory: \$((\$MEMORY_TO_USE / 1024 / 1024)) MB" | tee -a \$LOG_FILE
 
-# Start Ray worker with direct connection to head node and capture logs
+# Start Ray worker with the most stable configuration
 echo "Starting Ray worker with connection to $HEAD_NODE_IP:6379..." | tee -a \$LOG_FILE
-echo "Command: ray start --address=$HEAD_NODE_IP:6379 --num-cpus=2 --object-store-memory=\$OBJECT_STORE_MEMORY --plasma-directory=/tmp --logging-level=debug --log-style=record --block" | tee -a \$LOG_FILE
 
-# Run Ray and capture both stdout and stderr
-ray start --address=$HEAD_NODE_IP:6379 \
+# Use the most stable command version
+ray start \
+  --address="$HEAD_NODE_IP:6379" \
   --num-cpus=2 \
+  --memory=\$MEMORY_TO_USE \
   --object-store-memory=\$OBJECT_STORE_MEMORY \
   --plasma-directory=/tmp \
-  --logging-level=debug \
-  --log-style=record \
+  --resources='{"worker_node": 1.0}' \
   --block >> \$LOG_FILE 2>> \$ERROR_FILE
 
 # This should not be reached unless Ray exits
 echo "Ray worker exited with code \$?" | tee -a \$LOG_FILE
 echo "See error log at \$ERROR_FILE" | tee -a \$LOG_FILE
 echo "================ Ray Worker Stopped =================" | tee -a \$LOG_FILE
-
-# Keep the script running for a minute to allow investigation of logs
-echo "Waiting 60 seconds before terminating script..." | tee -a \$LOG_FILE
-sleep 60
 EOF
 
 chmod +x /home/$USERNAME/ray-cluster/direct_worker.sh
