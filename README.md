@@ -1,29 +1,24 @@
-# Cursor-Ray Cluster Setup
+# Simplified Ray Cluster Setup
 
-A comprehensive system for distributing CPU-intensive workloads across multiple machines using Ray, integrated with Cursor IDE and Claude 3.7 Sonnet for enhanced AI-assisted development.
+A minimalist system for distributing CPU-intensive workloads across multiple machines using Ray.
 
 ## Overview
 
-This project creates a distributed computing environment that allows you to:
+This project creates a basic distributed computing environment that:
 
-1. Use a powerful machine as the head node with Cursor IDE and Claude 3.7 Sonnet integration
-2. Distribute CPU-intensive tasks (code indexing, linting, formatting, testing) across worker machines
-3. Share code and data via NFS for seamless development
-4. Monitor cluster performance via Grafana dashboards
-5. Access Claude API via a Ray-powered proxy server
+1. Uses a head node to coordinate Ray cluster operations
+2. Distributes tasks across worker nodes
+3. Provides tools for distributed code processing (linting, formatting, indexing, testing)
 
 ## System Requirements
 
 ### Head Node Requirements
-- Ubuntu 20.04+ or Windows 10/11 with WSL2
+- Ubuntu 20.04+ or other Linux distro
 - Python 3.8+
-- Cursor IDE
 - 8GB+ RAM recommended
-- Docker and Docker Compose
-- Stable internet connection for Claude API
 
 ### Worker Node Requirements
-- Ubuntu 20.04+ or any Linux distribution with Python support
+- Ubuntu 20.04+ or other Linux distro
 - Python 3.8+
 - 4GB+ RAM
 - Network connectivity to head node
@@ -33,296 +28,91 @@ This project creates a distributed computing environment that allows you to:
 ### 1. Set up the Head Node
 
 ```bash
-# Clone this repository
-git clone https://github.com/yourusername/cursor-ray-cluster-setup.git
-cd cursor-ray-cluster-setup
+# Install Ray
+pip install "ray[default]==2.10.0" pandas numpy psutil
 
-# Run the head node setup script
-sudo ./cluster/head_setup.sh
+# Start Ray head node
+ray start --head --port=6379
 ```
-
-This will:
-- Install required packages (Ray, FastAPI, uvicorn, etc.)
-- Install Docker and Docker Compose
-- Configure NFS server for code sharing
-- Set up Python environment with Ray
-- Set up Prometheus and Grafana for monitoring
-- Create startup scripts for the head node
-- Configure firewall rules for Ray
 
 ### 2. Set up Worker Nodes
 
-Copy the `cluster/worker_setup.sh` script to each worker machine and run:
+On each worker machine:
 
 ```bash
-# Replace with your head node's IP address
-sudo ./cluster/worker_setup.sh 192.168.1.100
+# Download the worker setup script
+wget -O worker_setup.sh https://raw.githubusercontent.com/yourusername/cursor-ray-cluster-setup/main/cluster/worker_setup.sh
+
+# Run the setup script (replace with your head node's IP)
+sudo bash worker_setup.sh 192.168.1.10
 ```
 
-This will:
-- Install required packages
-- Mount the NFS share from the head node
-- Set up Python environment with Ray
-- Configure automatic connection to the head node
-- Set up a systemd service to start Ray on boot
-
-### 3. Start the Ray Cluster and Monitoring
+### 3. Verify Cluster Setup
 
 On the head node:
 
 ```bash
-# Start the Ray head node
-~/ray-cluster/start_head.sh
-
-# Start the monitoring stack (Prometheus + Grafana)
-~/ray-cluster/start_monitoring.sh
+# Check cluster status
+ray status
 ```
 
-The worker nodes should connect automatically. Verify the connection by visiting the Ray dashboard at http://head-node-ip:8265
+The Ray dashboard will be available at http://head-node-ip:8265
 
-Access the Grafana monitoring dashboard at http://head-node-ip:3000 (default credentials: admin/admin)
+## Available Tools
 
-### 4. Start the Ray Proxy Server for Claude API
+The following command-line tools are available:
 
 ```bash
-cd ~/cursor-ray-cluster-setup
-source ~/ray-env/bin/activate
-python scripts/start_ray_proxy.py
-```
+# Run linting in parallel
+ray-linter --directory ./your_project
 
-## Project Structure
+# Run formatting in parallel
+ray-formatter --directory ./your_project
 
-```
-cursor-ray-cluster-setup/
-├── cluster/                  # Cluster setup and management
-│   ├── head_setup.sh         # Setup script for head node
-│   ├── worker_setup.sh       # Setup script for worker nodes
-│   ├── ray_start.sh          # Script to start Ray
-│   ├── ray_stop.sh           # Script to stop Ray
-│   ├── start_cluster.sh      # Script to start the entire cluster
-│   └── monitor.py            # Cluster monitoring utility
-├── scripts/                  # Utility scripts
-│   ├── start_ray_proxy.py    # Script to start the Ray proxy for Claude API
-│   ├── benchmarks.py         # Benchmarking utilities for the Ray cluster
-│   ├── run_linter.py         # Run code linters in parallel using Ray
-│   ├── run_formatter.py      # Run code formatters in parallel using Ray
-│   ├── run_indexer.py        # Index code in parallel using Ray
-│   └── run_tests.py          # Run tests in parallel using Ray
-├── ray_tasks/                # Ray task definitions
-│   ├── resource_utils.py     # Resource allocation utilities
-│   ├── task_manager.py       # Task distribution manager
-│   ├── code_indexer.py       # Code indexing functionality
-│   ├── batch_linter.py       # Batch linting functionality
-│   ├── gpt_proxy.py          # GPT/Claude API proxy functionality
-│   └── error_handling.py     # Error handling utilities
-├── examples/                 # Example distributed applications
-│   ├── file_processing.py    # Distributed file processing example
-│   ├── data_etl.py           # Data extraction/transformation/loading example
-│   ├── image_processing.py   # Image processing example
-│   └── ml_training.py        # Machine learning training example
-├── net/                      # Network configuration
-│   ├── aliases.sh            # Shell aliases for network tasks
-│   ├── setup_keys.sh         # SSH key setup script
-│   ├── ssh_config.example    # Example SSH configuration
-│   └── tmux_config           # Tmux configuration
-├── setup.py                  # Package setup file
-└── README.md                 # This file
-```
+# Run code indexing in parallel
+ray-indexer --directory ./your_project
 
-## Features
-
-### Distributed Code Processing
-
-The system provides several utilities for distributed code processing:
-
-#### Code Linting
-
-```bash
-ray-linter --directory ./your_project --formatters flake8,pylint,mypy --output lint_results.json
-```
-
-Distributes linting tasks across the cluster for faster code quality checks.
-
-#### Code Formatting
-
-```bash
-ray-formatter --directory ./your_project --formatters black,isort --check-only
-```
-
-Formats Python code in parallel using black and isort.
-
-#### Code Indexing
-
-```bash
-ray-indexer --directory ./your_project --output index.json --include-docstrings --include-imports
-```
-
-Creates a code index for navigation and documentation in parallel.
-
-#### Parallel Testing
-
-```bash
-ray-tests --directory ./your_project/tests --verbose
-```
-
-Distributes test execution across the cluster.
-
-### Monitoring with Grafana and Prometheus
-
-The system includes comprehensive monitoring with pre-configured dashboards:
-
-- CPU and memory usage per node
-- Number of active/pending workers
-- Task execution metrics
-- Node health status
-
-Access the monitoring dashboard at http://head-node-ip:3000 with the default credentials (admin/admin).
-
-The monitoring stack includes:
-- **Prometheus**: For metrics collection from Ray and system resources
-- **Grafana**: For visualization and alerting
-- **Node Exporter**: For collecting system metrics from each node
-
-### Benchmarking
-
-The system includes benchmarking tools to measure performance:
-
-```bash
-python scripts/benchmarks.py --include latency,throughput,resource,data_transfer --iterations 10
-```
-
-Available benchmarks:
-- Task latency
-- Task throughput
-- CPU/memory utilization
-- Data transfer performance
-
-### Claude API Integration
-
-The Ray proxy server allows Cursor IDE to communicate with Claude API while distributing processing across the cluster:
-
-1. Configure Claude API key in the `.env` file
-2. Start the Ray proxy server on the head node
-3. In Cursor IDE settings, set the API endpoint to `http://localhost:8000/v1`
-
-## Advanced Configuration
-
-### Customizing Ray Configuration
-
-Edit the `ray_tasks/resource_utils.py` file to customize:
-- CPU and memory allocations
-- Object store size
-- Custom resources
-
-### Scaling the Cluster
-
-#### Adding More Worker Nodes
-
-Simply run the `cluster/worker_setup.sh` script on any new machine you want to add to the cluster. The head node will automatically detect and utilize the new resources.
-
-#### Using Cloud Instances
-
-The setup can be adapted for cloud environments:
-1. Set up a head node on a cloud VM
-2. Configure security groups/firewall rules to allow Ray ports (6379, 8265, 10001-10999)
-3. Launch worker instances and run the worker setup script
-
-### Customizing Monitoring
-
-To customize Grafana dashboards:
-
-1. Log into Grafana at http://head-node-ip:3000
-2. Navigate to the Dashboards section
-3. Edit the existing Ray Cluster Dashboard or create new ones
-
-To add custom metrics:
-
-1. Edit the `~/ray-cluster/monitoring/prometheus.yml` file
-2. Add new scrape targets or jobs
-3. Restart the monitoring stack with `~/ray-cluster/stop_monitoring.sh` and `~/ray-cluster/start_monitoring.sh`
-
-### Performance Optimization
-
-#### Resource Allocation
-
-Adjust worker node CPU/memory allocation in `ray_tasks/resource_utils.py`:
-
-```python
-def configure_resources():
-    # Customize based on your hardware
-    return {
-        "num_cpus": os.cpu_count() - 1,  # Reserve 1 CPU for system
-        "memory": int(psutil.virtual_memory().total * 0.8),  # Use 80% of memory
-    }
-```
-
-#### Job Scheduling
-
-For large workloads, use the Ray Job Submission API:
-
-```python
-from ray.job_submission import JobSubmissionClient
-client = JobSubmissionClient("http://head-node-ip:8265")
-job_id = client.submit_job(
-    entrypoint="python scripts/run_indexer.py --directory /path/to/large/project",
-    runtime_env={"working_dir": "."}
-)
+# Run tests in parallel
+ray-tests --directory ./your_project/tests
 ```
 
 ## Troubleshooting
 
-### Worker Node Connection Issues
+If worker nodes are going offline:
 
-If worker nodes aren't connecting:
-1. Check network connectivity: `ping head-node-ip`
-2. Verify firewall settings: `sudo ufw status`
-3. Check Ray logs on worker: `sudo journalctl -u ray-worker`
-4. Ensure ports 6379 and 10001-10999 are open
+1. Check network connectivity between nodes
+2. Verify Ray version is the same on all nodes (2.10.0 recommended)
+3. Ensure firewall allows Ray ports (6379, 8265, 10001-10999)
+4. Check logs on worker nodes with: `sudo journalctl -u ray-worker -f`
+5. Manually restart the worker service with: `sudo systemctl restart ray-worker`
 
-### NFS Mount Issues
+## Manual Operation
 
-If code sharing via NFS is not working:
+### Starting Worker Manually
+
+If the service approach is not working, you can manually start a worker:
+
 ```bash
-# On head node
-sudo systemctl status nfs-kernel-server
+# Stop the service first
+sudo systemctl stop ray-worker
 
-# On worker node
-sudo mount -t nfs head-node-ip:/mnt/code /mnt/code -v
+# Start worker manually
+source ~/ray-env/bin/activate
+ray start --address='192.168.1.10:6379' --num-cpus=4 --block
 ```
 
-### Ray Dashboard Not Accessible
+### Simplified Ray Commands
 
-If you can't access the dashboard:
-1. Check that the dashboard is running: `ps aux | grep ray::dashboard`
-2. Verify the dashboard port is open: `sudo ufw status | grep 8265`
-3. Try accessing from the head node itself: `curl localhost:8265`
+```bash
+# Start head node
+ray start --head --port=6379
 
-### Monitoring Issues
+# Start worker node
+ray start --address='192.168.1.10:6379' --block
 
-If Grafana or Prometheus aren't working:
+# Stop Ray
+ray stop
 
-1. Check Docker containers status: `docker ps`
-2. Check Docker Compose logs: `cd ~/ray-cluster/monitoring && docker-compose logs`
-3. Verify that the Ray metrics endpoint is accessible: `curl localhost:8265/api/metrics`
-4. Check if Prometheus can reach the metrics endpoint (host networking issues)
-
-### Claude API Proxy Issues
-
-If the proxy server isn't working:
-1. Check that the proxy is running: `ps aux | grep start_ray_proxy`
-2. Verify your Claude API key in the `.env` file
-3. Check proxy logs for errors
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/my-feature`
-3. Commit your changes: `git commit -am 'Add my feature'`
-4. Push to the branch: `git push origin feature/my-feature`
-5. Submit a Pull Request
-
-## License
-
-MIT
+# Check status
+ray status
+```
