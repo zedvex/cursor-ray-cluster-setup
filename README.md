@@ -23,6 +23,10 @@ This project creates a basic distributed computing environment that:
 - 4GB+ RAM
 - Network connectivity to head node
 
+## Ray Version Notes
+
+This project uses Ray 2.31.0 or newer since older versions (like 2.10.0) are no longer available in the PyPI repositories. Make sure the same Ray version is installed on all nodes.
+
 ## Quick Start
 
 ### 1. Set up the Head Node
@@ -52,7 +56,7 @@ sudo bash cluster/worker_setup.sh 192.168.1.10
 The setup script will handle:
 - Installing Python and dependencies
 - Creating a Python virtual environment
-- Installing Ray 2.10.0
+- Installing Ray 2.31.0 or newer
 - Setting up a systemd service to run Ray
 - Configuring system limits
 - Starting Ray worker process
@@ -101,6 +105,25 @@ ray-tests --directory ./your_project/tests
 ```
 
 ## Troubleshooting
+
+### Service fails to start after several attempts
+
+If the service fails to start and reaches its start limit:
+
+1. Reset the service failure counter:
+   ```bash
+   sudo systemctl reset-failed ray-worker.service
+   ```
+
+2. Check for specific issues in the logs:
+   ```bash
+   sudo journalctl -u ray-worker -e
+   ```
+
+3. Try running the start script manually to see the output:
+   ```bash
+   sudo -u username /home/username/ray-cluster/start_worker.sh
+   ```
 
 ### "/tmp/ray: Operation not permitted" Error
 
@@ -169,7 +192,7 @@ This means the Ray executable is not in the PATH. The setup scripts have been up
 If worker nodes are going offline:
 
 1. Check network connectivity between nodes with `ping`
-2. Verify Ray version is the same on all nodes (2.10.0 recommended)
+2. Verify Ray version is the same on all nodes
 3. Ensure firewall allows Ray ports (6379, 8265, 10001-10999)
 4. Check logs on worker nodes with: `sudo journalctl -u ray-worker -f`
 5. Manually restart the worker service with: `sudo systemctl restart ray-worker`
