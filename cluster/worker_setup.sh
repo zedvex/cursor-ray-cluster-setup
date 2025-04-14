@@ -171,7 +171,7 @@ rm -rf /tmp/ray
 # Start Ray worker in the most basic way
 # The --block flag ensures it stays in the foreground
 echo "Starting Ray worker with connection to $HEAD_NODE_IP:6379"
-ray start --address=$HEAD_NODE_IP:6379 --num-cpus=4 --block
+ray start --address='$HEAD_NODE_IP:6379' --num-cpus=4 --block
 EOF
 
 chmod +x /home/$USERNAME/ray-cluster/start_worker.sh
