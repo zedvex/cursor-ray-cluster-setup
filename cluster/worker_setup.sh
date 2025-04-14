@@ -53,8 +53,13 @@ echo "Installing system dependencies for Ray..."
 apt-get install -y build-essential libgl1 libjpeg-dev libxrender1 libsm6 libxext6 libx11-6
 
 # Ensure Python in virtual env has access to system site packages (may help with some dependencies)
-su - $USERNAME -c "touch /home/$USERNAME/ray-env/lib/python*/site-packages/setuptools.pth"
-su - $USERNAME -c "echo '/usr/lib/python*/dist-packages' > /home/$USERNAME/ray-env/lib/python*/site-packages/setuptools.pth"
+echo "Setting up system site-packages access..."
+PYTHON_VERSION=$(su - $USERNAME -c "source /home/$USERNAME/ray-env/bin/activate && python3 --version | cut -d' ' -f2 | cut -d'.' -f1-2")
+SITE_PACKAGES_DIR="/home/$USERNAME/ray-env/lib/python${PYTHON_VERSION}/site-packages"
+su - $USERNAME -c "mkdir -p $SITE_PACKAGES_DIR"
+su - $USERNAME -c "touch $SITE_PACKAGES_DIR/setuptools.pth"
+su - $USERNAME -c "echo '/usr/lib/python3/dist-packages' > $SITE_PACKAGES_DIR/setuptools.pth"
+echo "Added system site-packages to Python path"
 
 # Create a shared memory directory that can be used by Ray
 echo "Setting up shared memory for Ray..."
