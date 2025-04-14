@@ -11,13 +11,19 @@ echo "Using head node IP: $HEAD_NODE_IP"
 
 # Stop any existing Ray processes
 echo "Stopping any existing Ray processes..."
-source ~/ray-env/bin/activate
-ray stop 2>/dev/null || true
+if [ -d "$HOME/ray-env" ]; then
+  source "$HOME/ray-env/bin/activate"
+  ray stop 2>/dev/null || true
+fi
 tmux kill-session -t ray-worker 2>/dev/null || true
 sleep 2
 
 echo "Pulling latest changes from git..."
 git pull
+
+echo "Making scripts executable..."
+chmod +x cluster/worker_setup.sh
+chmod +x cluster/update_worker.sh
 
 echo "Running worker setup script..."
 sudo bash cluster/worker_setup.sh "$HEAD_NODE_IP"

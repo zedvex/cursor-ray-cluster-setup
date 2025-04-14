@@ -20,7 +20,7 @@ echo "Setting up Ray worker node for user: $USERNAME"
 # Install required packages
 echo "Installing required packages..."
 apt-get update
-apt-get install -y python3-venv python3-pip tmux htop git curl wget lsof net-tools netcat
+apt-get install -y python3-venv python3-pip tmux htop git curl wget lsof net-tools netcat-openbsd
 
 # Configure firewall
 echo "Configuring firewall..."
