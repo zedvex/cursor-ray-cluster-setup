@@ -30,7 +30,13 @@ fi
 # Create directories
 mkdir -p $HOME_DIR/ray-cluster
 CLUSTER_DIR="$HOME_DIR/ray-cluster"
+SCRIPTS_DIR="$CLUSTER_DIR/scripts"
+mkdir -p $SCRIPTS_DIR
 ENV_DIR="$HOME_DIR/ray-env"
+
+# Set proper ownership
+chown -R $ACTUAL_USER:$ACTUAL_USER $CLUSTER_DIR
+chown -R $ACTUAL_USER:$ACTUAL_USER $SCRIPTS_DIR
 
 # Install system dependencies
 apt-get update
@@ -39,7 +45,6 @@ apt-get install -y python3 python3-pip python3-venv sudo curl
 # Create virtual environment
 python3 -m venv $ENV_DIR
 chown -R $ACTUAL_USER:$ACTUAL_USER $ENV_DIR
-chown -R $ACTUAL_USER:$ACTUAL_USER $CLUSTER_DIR
 
 # Upgrade pip and install Ray
 sudo -u $ACTUAL_USER $ENV_DIR/bin/pip install --upgrade pip
@@ -49,8 +54,10 @@ sudo -u $ACTUAL_USER $ENV_DIR/bin/pip install 'ray[default]>=2.31.0' fastapi uvi
 
 # Verify Ray installation
 echo "Verifying Ray installation..."
-RAY_PATH=$(sudo -u $ACTUAL_USER $ENV_DIR/bin/which ray || echo "NOT_FOUND")
-if [ "$RAY_PATH" = "NOT_FOUND" ]; then
+if which $ENV_DIR/bin/ray > /dev/null 2>&1; then
+    RAY_PATH="$ENV_DIR/bin/ray"
+    echo "Ray executable found at: $RAY_PATH"
+else
     RAY_PATH=$(find $ENV_DIR -name ray -type f -executable | head -1)
     if [ -z "$RAY_PATH" ]; then
         echo "ERROR: Ray executable not found! Installation may have failed."
@@ -61,13 +68,11 @@ if [ "$RAY_PATH" = "NOT_FOUND" ]; then
         exit 1
     fi
     echo "Found Ray at: $RAY_PATH"
-else
-    echo "Ray executable found at: $RAY_PATH"
 fi
 
 # Verify Ray version
 echo "Ray version:"
-sudo -u $ACTUAL_USER $ENV_DIR/bin/ray --version
+sudo -u $ACTUAL_USER $RAY_PATH --version
 
 # Configure system limits for Ray
 cat > /etc/security/limits.d/ray.conf << EOF
@@ -128,7 +133,7 @@ CURRENT_IP=\$(hostname -I | awk '{print \$1}')
 echo "Starting Ray head node on \$CURRENT_IP"
 
 # Make scripts directory
-mkdir -p $CLUSTER_DIR/scripts
+mkdir -p $SCRIPTS_DIR
 
 # Start the Ray head node
 \$RAY_PATH start --head \\
@@ -141,7 +146,7 @@ mkdir -p $CLUSTER_DIR/scripts
 EOF
 
 # Create FastAPI server script
-cat > $CLUSTER_DIR/scripts/start_ray_proxy.py << EOF
+cat > $SCRIPTS_DIR/start_ray_proxy.py << EOF
 #!/usr/bin/env python3
 """
 Ray API proxy server built with FastAPI.
@@ -291,7 +296,7 @@ EOF
 
 # Make scripts executable
 chmod +x $CLUSTER_DIR/start_head.sh
-chmod +x $CLUSTER_DIR/scripts/start_ray_proxy.py
+chmod +x $SCRIPTS_DIR/start_ray_proxy.py
 chown -R $ACTUAL_USER:$ACTUAL_USER $CLUSTER_DIR
 
 # Test the head script without blocking
@@ -340,7 +345,7 @@ User=$ACTUAL_USER
 Group=$ACTUAL_USER
 WorkingDirectory=$CLUSTER_DIR
 Environment="PATH=$ENV_DIR/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-ExecStart=$ENV_DIR/bin/python $CLUSTER_DIR/scripts/start_ray_proxy.py --ray-address=localhost:6379
+ExecStart=$ENV_DIR/bin/python $SCRIPTS_DIR/start_ray_proxy.py --ray-address=localhost:6379
 Restart=on-failure
 RestartSec=10
 
